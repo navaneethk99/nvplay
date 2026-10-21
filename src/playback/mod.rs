@@ -50,6 +50,7 @@ pub enum PlaybackEvent {
     Finished,
     Error(String),
     Loaded,
+    SubtitleAdded { id: u64, result: Result<(), String> },
 }
 
 pub struct Player {
@@ -87,6 +88,21 @@ impl Player {
     #[cfg(test)]
     pub(crate) fn for_ui_test(ctx: &eframe::egui::Context) -> Result<Self, String> {
         Self::create("null", Some("null"), Some(ctx))
+    }
+    #[cfg(test)]
+    pub(crate) fn test_property(&self, name: &str) -> Option<String> {
+        let name = CString::new(name).ok()?;
+        // SAFETY: used only with the null-output test player. The returned mpv
+        // string is copied and freed with mpv_free, never Rust's allocator.
+        unsafe {
+            let value = (self.client.api.get_property_string)(self.client.handle, name.as_ptr());
+            if value.is_null() {
+                return None;
+            }
+            let result = CStr::from_ptr(value).to_string_lossy().into_owned();
+            (self.client.api.free)(value.cast());
+            Some(result)
+        }
     }
     pub fn new(ctx: &eframe::egui::Context) -> Result<Self, String> {
         Self::create("libmpv", None, Some(ctx))
@@ -259,6 +275,15 @@ impl Player {
             self.cinejoy_resolver = None;
             self.pending_load_error = None;
         }
+        self.command_tagged(arguments, u64::from(arguments.first() == Some(&"loadfile")))
+    }
+
+    /// The reply identifies whether this particular subtitle was accepted.
+    pub fn add_subtitle(&mut self, path: &str, title: &str, id: u64) -> Result<(), String> {
+        debug_assert!(id >= 2);
+        self.command_tagged(&["sub-add", path, "select", title], id)
+    }
+    fn command_tagged(&mut self, arguments: &[&str], id: u64) -> Result<(), String> {
         let strings: Vec<CString> = arguments
             .iter()
             .map(|s| {
@@ -270,11 +295,7 @@ impl Player {
         pointers.push(std::ptr::null());
         // SAFETY: null-terminated argument array valid for this call; mpv copies it.
         self.client.api.check(unsafe {
-            (self.client.api.command_async)(
-                self.client.handle,
-                u64::from(arguments.first() == Some(&"loadfile")),
-                pointers.as_ptr(),
-            )
+            (self.client.api.command_async)(self.client.handle, id, pointers.as_ptr())
         })
     }
 
@@ -359,6 +380,12 @@ impl Player {
                             }
                         }
                     }
+                }
+                5 if event.userdata >= 2 => {
+                    events.push(PlaybackEvent::SubtitleAdded {
+                        id: event.userdata,
+                        result: self.client.api.check(event.error),
+                    });
                 }
                 5 if event.error < 0 => {
                     let summary = self.client.api.check(event.error).unwrap_err();

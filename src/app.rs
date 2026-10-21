@@ -4,6 +4,8 @@ mod movie_search;
 mod native_menu;
 mod posters;
 mod preview;
+mod subtitle_controls;
+mod subtitle_search;
 #[cfg(target_os = "macos")]
 mod updates;
 
@@ -46,7 +48,7 @@ impl Media {
 }
 enum DialogResult {
     Media(Vec<PathBuf>),
-    Subtitle(PathBuf),
+    Subtitle { path: PathBuf, generation: u64 },
     Folder(Result<Vec<PathBuf>, String>),
 }
 
@@ -70,6 +72,11 @@ pub struct PlayerApp {
     startup_error: bool,
     show_url: bool,
     movie_search: movie_search::MovieSearch,
+    subtitle_search: subtitle_search::SubtitleSearch,
+    playback_generation: u64,
+    downloaded_subtitles: Vec<crate::subtitles::Downloaded>,
+    subtitle_preferences: subtitle_controls::Preferences,
+    sidebar_subtitles: bool,
     url: String,
     fullscreen: bool,
     repeat: bool,
@@ -154,6 +161,11 @@ impl PlayerApp {
             startup_error,
             show_url: false,
             movie_search: movie_search::MovieSearch::default(),
+            subtitle_search: subtitle_search::SubtitleSearch::default(),
+            playback_generation: 0,
+            downloaded_subtitles: Vec::new(),
+            subtitle_preferences: subtitle_controls::Preferences::default(),
+            sidebar_subtitles: false,
             url: String::new(),
             fullscreen: false,
             repeat: false,
@@ -183,6 +195,7 @@ impl PlayerApp {
             #[cfg(test)]
             control_rects: ControlRects::default(),
         };
+        app.apply_subtitle_style();
         for source in sources {
             match source.into_string() {
                 Ok(source) => app.queue.push(Media::new(source)),
@@ -216,6 +229,9 @@ impl PlayerApp {
                     {
                         let _ = player.command(&["set", "force-media-title", &media.name]);
                     }
+                    self.playback_generation = self.playback_generation.wrapping_add(1);
+                    self.subtitle_search.close();
+                    self.subtitle_preferences.cancel_pending();
                     self.current = Some(index);
                     self.error = None;
                     self.seek_preview = None;
@@ -258,14 +274,18 @@ impl PlayerApp {
             return;
         }
         self.dialog_busy = true;
+        let generation = self.playback_generation;
         self.dialog = Some(if subtitles {
-            Box::pin(async {
+            Box::pin(async move {
                 rfd::AsyncFileDialog::new()
                     .set_title("Add subtitles")
-                    .add_filter("Subtitles", &["srt", "ass", "ssa", "vtt", "sub"])
+                    .add_filter("Subtitles", &["srt", "ass", "ssa", "vtt", "sub", "idx"])
                     .pick_file()
                     .await
-                    .map(|file| DialogResult::Subtitle(file.path().to_path_buf()))
+                    .map(|file| DialogResult::Subtitle {
+                        path: file.path().to_path_buf(),
+                        generation,
+                    })
                     .unwrap_or(DialogResult::Media(Vec::new()))
             })
         } else {
@@ -326,10 +346,11 @@ impl PlayerApp {
                 DialogResult::Media(paths) => self.add_paths(paths),
                 DialogResult::Folder(Ok(paths)) => self.enqueue_paths(paths, false),
                 DialogResult::Folder(Err(error)) => self.error = Some(error),
-                DialogResult::Subtitle(path) => match path.to_str() {
-                    Some(path) => self.command(&["sub-add", path, "select"]),
-                    None => self.error = Some("The subtitle path is not valid Unicode".into()),
-                },
+                DialogResult::Subtitle { path, generation } => {
+                    if generation == self.playback_generation {
+                        self.add_subtitle(path);
+                    }
+                }
             }
         }
     }
@@ -362,6 +383,10 @@ impl PlayerApp {
             return;
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            if self.subtitle_search.open {
+                self.subtitle_search.close();
+                return;
+            }
             if self.movie_search.open {
                 self.movie_search.close();
                 return;
@@ -383,7 +408,12 @@ impl PlayerApp {
                 return;
             }
         }
-        if ctx.wants_keyboard_input() || self.show_url || self.show_help || self.movie_search.open {
+        if ctx.wants_keyboard_input()
+            || self.show_url
+            || self.show_help
+            || self.movie_search.open
+            || self.subtitle_search.open
+        {
             return;
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::O)) {
@@ -429,6 +459,9 @@ impl PlayerApp {
     }
 
     fn stop(&mut self) {
+        self.playback_generation = self.playback_generation.wrapping_add(1);
+        self.subtitle_search.close();
+        self.subtitle_preferences.cancel_pending();
         self.command(&["stop"]);
         self.loading = false;
         self.seek_preview = None;
@@ -548,8 +581,16 @@ impl PlayerApp {
                 }
             });
             ui.menu_button("Subtitle", |ui| {
+                if ui.button("Download Subtitle…").clicked() {
+                    self.open_subtitle_search();
+                    ui.close();
+                }
                 if ui.button("Add Subtitle File…").clicked() {
                     self.pick(true);
+                    ui.close();
+                }
+                if ui.button("Subtitle appearance…").clicked() {
+                    self.open_subtitle_controls();
                     ui.close();
                 }
                 ui.menu_button("Subtitle Track", |ui| self.track_menu(ui, "sub", "sid"));
@@ -596,7 +637,11 @@ impl PlayerApp {
                     });
                 }
                 ui.horizontal(|ui| {
-                    ui.strong(format!("Playlist ({})", self.queue.len()));
+                    ui.strong(if self.sidebar_subtitles {
+                        "Subtitles".into()
+                    } else {
+                        format!("Playlist ({})", self.queue.len())
+                    });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icons::small_button(ui, Icon::Close, "Close playlist sidebar").clicked()
                         {
@@ -604,7 +649,15 @@ impl PlayerApp {
                         }
                     });
                 });
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.sidebar_subtitles, false, "Playlist");
+                    ui.selectable_value(&mut self.sidebar_subtitles, true, "Subtitles");
+                });
                 ui.separator();
+                if self.sidebar_subtitles {
+                    self.subtitle_controls(ui);
+                    return;
+                }
                 if ui
                     .add_enabled(!self.dialog_busy, egui::Button::new("Add Folder…"))
                     .on_hover_text("Add videos from a folder and its subfolders")
@@ -923,10 +976,13 @@ impl PlayerApp {
             .seek_preview
             .or(self.pending_seek.map(|p| p.0))
             .unwrap_or(position);
-        let display_volume = self
-            .volume_preview
-            .or(self.pending_volume.map(|p| p.0))
-            .unwrap_or(volume);
+        let display_volume = if muted {
+            0.0
+        } else {
+            self.volume_preview
+                .or(self.pending_volume.map(|p| p.0))
+                .unwrap_or(volume)
+        };
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             let show_volume_value = ui.available_width() >= 560.0;
@@ -1117,7 +1173,6 @@ impl PlayerApp {
             );
             ui.add_space(3.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.visuals_mut().selection.bg_fill = ACCENT;
                 ui.spacing_mut().slider_width = volume_width;
                 let mut volume = display_volume;
                 if show_volume_value {
@@ -1136,17 +1191,27 @@ impl PlayerApp {
                         .halign(egui::Align::RIGHT),
                     );
                 }
-                let response = ui.add_enabled(
-                    self.player.is_some(),
-                    egui::Slider::new(&mut volume, 0.0..=100.0)
-                        .show_value(false)
-                        .trailing_fill(true),
-                );
+                // Keep the slider's orange fill local so selected icon buttons
+                // retain their contrasting background.
+                let response = ui
+                    .scope(|ui| {
+                        ui.visuals_mut().selection.bg_fill = ACCENT;
+                        ui.add_enabled(
+                            self.player.is_some(),
+                            egui::Slider::new(&mut volume, 0.0..=100.0)
+                                .show_value(false)
+                                .trailing_fill(true),
+                        )
+                    })
+                    .inner;
                 #[cfg(test)]
                 {
                     self.control_rects.volume = Some(response.rect);
                 }
                 if response.changed() {
+                    if muted {
+                        self.command(&["set", "mute", "no"]);
+                    }
                     self.volume_preview = Some(volume);
                     self.set_volume(volume);
                 }
@@ -1537,6 +1602,24 @@ impl PlayerApp {
             });
     }
 
+    fn handle_playback_event(&mut self, event: PlaybackEvent) {
+        match event {
+            PlaybackEvent::Finished => {
+                self.loading = false;
+                self.next();
+            }
+            PlaybackEvent::Error(error) => {
+                self.error = Some(error);
+                self.loading = false;
+            }
+            PlaybackEvent::Loaded => {
+                self.loading = false;
+                self.restore_subtitle();
+            }
+            PlaybackEvent::SubtitleAdded { id, result } => self.subtitle_added(id, result),
+        }
+    }
+
     fn ui(&mut self, ctx: &egui::Context) {
         // macOS may restore a previous native window frame when relaunching the
         // bundle. Apply the compact size after creation as well as in the builder.
@@ -1571,18 +1654,9 @@ impl PlayerApp {
         }
         let events = self.player.as_mut().map(Player::poll).unwrap_or_default();
         for event in events {
-            match event {
-                PlaybackEvent::Finished => {
-                    self.loading = false;
-                    self.next();
-                }
-                PlaybackEvent::Error(error) => {
-                    self.error = Some(error);
-                    self.loading = false;
-                }
-                PlaybackEvent::Loaded => self.loading = false,
-            }
+            self.handle_playback_event(event);
         }
+        self.subtitle_preferences.poll(ctx);
         let drops = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -1669,6 +1743,7 @@ impl PlayerApp {
         let pinned = egui::Popup::is_any_open(ctx)
             || self.show_url
             || self.movie_search.open
+            || self.subtitle_search.open
             || self.show_help
             || self.show_info
             || self.show_playlist
@@ -1708,6 +1783,7 @@ impl PlayerApp {
         self.updates.ui(ctx);
         self.network_dialog(ctx);
         self.movie_search_dialog(ctx);
+        self.subtitle_search_dialog(ctx);
         if self.show_help {
             egui::Window::new("Keyboard shortcuts")
                 .open(&mut self.show_help)
@@ -1769,6 +1845,7 @@ impl eframe::App for PlayerApp {
         self.ui(ctx);
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.subtitle_preferences.flush();
         // Free mpv and our FBO before eframe destroys the current GL context.
         self.renderer.lock().unwrap().take();
     }
@@ -2690,7 +2767,10 @@ mod tests {
         );
         let mute = app.control_rects.mute.unwrap().center();
         click(&mut app, mute);
+        let saved_volume = app.player.as_ref().unwrap().state.volume;
         let output = until(&mut app, |app| app.player.as_ref().unwrap().state.muted);
+        assert_eq!(slider_value(&output, 100.0), 0.0);
+        assert_eq!(app.player.as_ref().unwrap().state.volume, saved_volume);
 
         #[cfg(not(target_os = "macos"))]
         {

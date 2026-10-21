@@ -91,7 +91,7 @@ The network dialog offers **Data saver (720p)**, **Balanced (1080p)** (default),
 
 Press **⌘⇧M** on macOS or **Ctrl+Shift+M** on Windows/Linux (or choose **Media → Search Movies…**) to search by movie title. Results appear as you type with poster thumbnails, titles, and release years. Posters load and decode in the background as results become visible, with at most four requests at once and a 64-poster memory cache. Missing artwork uses a placeholder and never blocks selection or playback. Use ↑/↓ to select a result and Enter to play, or click a result. Enter while results are loading plays the first verified match when ready. Esc closes search without interrupting the current movie. TMDB supplies candidate titles and artwork, but candidates are hidden until Cinejoy availability is verified. Up to three background checks resolve a movie, fetch the selected video/audio HLS playlists, and probe the initialization/first media bytes; failed or unchecked candidates never enter the result list. Confirmed matches appear progressively while remaining candidates are checked, with a 60-second overall search limit. Positive checks are cached for two minutes (up to 256 IDs); playback resolves afresh to avoid reusing expired stream URLs. Closing or editing search cancels outstanding checks. No website navigation or browser session is involved. Availability can still change after verification; a server outage or expired source can cause a later playback failure. Other website providers are not yet integrated into title search. Deno is required; Cinejoy's public catalog credential/API may change and require an integration update. TMDB attribution is available in the dialog's Movie data credits.
 
-Cinejoy movie watch URLs (`https://cinejoy.pk/watch/movie/<id>`) use a dedicated resolver instead of yt-dlp. Deno runs the public request encoder with a verified SHA-256 hash and no host imports, resolves HLS through the current API, and passes a temporary playlist to mpv. No browser or advertisements are loaded. The chosen video quality and default audio are selected before playback so FFmpeg does not probe every language track. This initial adapter supports movies, one audio track, and the existing 720p/1080p/original quality setting; TV episodes, additional audio selection, and subtitle importing are not implemented. Stop, opening another file, and closing the app cancel resolution. Resolution is limited to 35 seconds; upstream API/encoder changes may require an adapter update. Temporary playlists are removed when replaced or the player closes.
+Cinejoy movie watch URLs (`https://cinejoy.pk/watch/movie/<id>`) use a dedicated resolver instead of yt-dlp. Deno runs the public request encoder with a verified SHA-256 hash and no host imports, resolves HLS through the current API, and passes a temporary playlist to mpv. No browser or advertisements are loaded. The chosen video quality and default audio are selected before playback so FFmpeg does not probe every language track. This initial adapter supports movies, one audio track, and the existing 720p/1080p/original quality setting; TV episodes, additional audio selection, and importing provider-supplied subtitle tracks are not implemented. External subtitle files and OpenSubtitles downloads can be added through the Subtitle menu. Stop, opening another file, and closing the app cancel resolution. Resolution is limited to 35 seconds; upstream API/encoder changes may require an adapter update. Temporary playlists are removed when replaced or the player closes.
 
 **View → Playback information** shows buffered seconds, read rate, codec, active hardware decoder, and dropped frames. Low buffered time suggests a network/server bottleneck; accumulating decoder or render drops suggests a decoding/rendering bottleneck. Try Data saver when a website stream is too heavy.
 
@@ -100,6 +100,109 @@ Install a current yt-dlp build and its recommended JavaScript runtime, Deno, for
 The app discovers tools beside the executable, in a macOS bundle's `Contents/Resources`, on `PATH`, and in Homebrew's standard locations. Override with absolute executable paths in `NVPLAY_YTDLP` and `NVPLAY_DENO`. This also supports launching the macOS app from Finder with a minimal `PATH`. If a tool was just installed, restart nvplay. The libmpv build must include its Lua/ytdl hook support.
 
 **Netflix does not play here.** Its streams require account authentication and DRM through a [Netflix-supported browser or app](https://help.netflix.com/en/node/30081). Netflix links show an explicit explanation in the URL dialog. Other DRM services are also unsupported. Private, age-restricted, region-locked, or expired videos may fail; the app does not read your browser cookies or sign in to websites. Errors include recent engine/extractor diagnostics, and Stop cancels a pending stream. Website support depends on the current extractor and service, so arbitrary URLs cannot be guaranteed. A JavaScript-only watch page may have no extractable video in its HTML and needs a site-specific extractor. Unsupported pages report **Website not supported** with the extractor reason; follow-on errors about the internal `ytdl://` URL are suppressed.
+
+### Download subtitles
+
+Choose **Subtitle → Download Subtitle…**, enter the movie title and a language
+code (English is `en`), and click **Search**. Results show the movie, release,
+language, and download count. **Download and use** downloads the selected SRT,
+selects it in the current local video or network stream, and turns subtitles on.
+Match the release to your video for the best timing. Playback continues while
+searching and downloading. Changing or stopping the video cancels the dialog;
+a late download cannot attach to a different movie.
+
+OpenSubtitles has replaced its legacy `.org` API with the supported
+[OpenSubtitles REST API](https://opensubtitles.tawk.help/article/about-the-api).
+It requires an application API key from the
+[OpenSubtitles consumers page](https://www.opensubtitles.com/consumers).
+Paste a key under **Connection settings** in the dialog and click **Save key**.
+The app loads it automatically on future launches. **Remove saved key** deletes
+it. Keys are stored in a local settings file (`opensubtitles.key`):
+
+- macOS: `~/Library/Application Support/nvplay/`
+- Windows: `%APPDATA%\nvplay\`
+- Linux: `$XDG_CONFIG_HOME/nvplay/` (or `~/.config/nvplay/`)
+
+This file is unencrypted; on macOS/Linux it is readable and writable only by
+your user account (mode `0600`). You can also set
+`NVPLAY_OPENSUBTITLES_API_KEY` before launching the app; a nonempty environment
+value takes precedence over the saved key. No key is bundled in this repository.
+For example:
+
+```sh
+export NVPLAY_OPENSUBTITLES_API_KEY='your-api-key'
+cargo run --release
+```
+
+Search and downloads use this key without an account login and are subject to
+OpenSubtitles rate limits and anonymous daily download allowances. Errors are
+shown in the dialog. Downloads first use private temporary folders. Once mpv
+confirms that a subtitle was added, nvplay retains a copy in its subtitle cache
+and remembers it for that video. Temporary download files are removed on normal
+exit or cancellation. Cached copies remain available for future playback.
+
+To verify subtitle attachment against real libmpv playback:
+
+```sh
+NVPLAY_TEST_MEDIA='/path/to/movie.mp4' cargo test --locked real_download_completion_selects_and_shows_subtitle -- --ignored
+```
+
+The test also accepts an HTTP media URL. It injects a completed SRT download
+into the dialog and verifies that mpv selects the subtitle, enables visibility,
+and retains the file until shutdown. It does not contact OpenSubtitles; live
+provider search/download requires a valid API key.
+
+
+If the app reports that the connection was reset before a response arrived,
+OpenSubtitles could not be reached; the server has not validated the key.
+Try a different network or VPN and retry the search. Check whether
+`https://www.opensubtitles.com` opens on the same network. Re-entering the key
+will not resolve a transport reset. To check API connectivity without sending
+credentials, run:
+
+```sh
+cargo test --locked real_api_endpoint_is_reachable -- --ignored --nocapture
+```
+
+### Remembered subtitles and appearance
+
+The last successfully added external subtitle is remembered per video, whether
+it came from a local file or OpenSubtitles. Reopening that video automatically
+loads and selects the saved subtitle after the video finishes loading. No API
+request is needed to restore it. Cached copies survive removal of the original
+subtitle file. Local videos match by their canonical file path; streams match
+by the original URL (including stable Cinejoy movie watch URLs). A different
+signed stream URL counts as a different source.
+
+Open the sidebar with **Ctrl/Cmd+L** and choose **Subtitles**, or use
+**Subtitle → Subtitle appearance…**. Customize an installed font family, size,
+text color and opacity, bold/italic, stroke width and color, shadow or background
+box color, vertical position, alignment, margin, and letter spacing. Changes
+apply immediately and save automatically. **Reset appearance** restores the
+defaults. **Override subtitle file styles** applies your preferences to styled
+text subtitles; bitmap subtitle fonts and colors remain part of their images.
+Font availability depends on the computer; missing fonts fall back to an
+available font. Detailed styling behavior follows the
+[mpv subtitle options](https://mpv.io/manual/stable/#subtitles).
+
+Use **Forget subtitle for this video** in the same section to remove the
+association for future opens; the currently loaded subtitle keeps playing.
+Preferences and associations are stored in `subtitles.json` in the app settings
+folder listed above, with retained subtitle files in its `subtitles/` folder.
+The cache does not modify the movie or original subtitle file. Single subtitle
+files up to 32 MB can be retained; VobSub `.idx`/`.sub` pairs are copied together.
+Unreadable files or failed engine additions do not replace the saved record.
+
+To verify restoration and appearance against real playback:
+
+```sh
+NVPLAY_TEST_MEDIA='/path/to/movie.mp4' cargo test --locked real_subtitle_is_restored_after_restart_with_saved_appearance -- --ignored
+```
+
+This uses isolated preferences, attaches a subtitle, saves appearance changes,
+deletes the original subtitle, restarts the player, and checks automatic
+selection and the restored font, colors, and stroke in mpv. It also accepts an
+HTTP media URL and needs no OpenSubtitles connection.
 
 ## Included
 
@@ -146,7 +249,7 @@ Keep future features behind the playback layer rather than adding native API cal
 
 Mute, selected tracks, volume, duration, position, seekability, buffering, and audio output all come from engine properties. A seek/volume preview lasts only until the engine acknowledges it or a short timeout expires. Audio metadata is refreshed asynchronously after decoder reconfiguration. Native file pickers use non-blocking futures polled on the UI thread. **View → Playback information** shows current engine state, audio format/output, and render statistics for troubleshooting.
 
-Useful next milestones: persistent settings and recent files, frame stepping and screenshots, playlist import/export, platform-specific packaging, and signed installers. Queue and settings are currently in-memory. HDR passthrough, disc menus, casting, and a plugin system are not implemented. On macOS the OpenGL player prefers VideoToolbox copy-back hardware decoding, with mpv auto/software fallback. Other platforms use mpv’s `auto-safe` policy. This does not guarantee zero-copy decoding.
+Useful next milestones: persistent settings and recent files, frame stepping and screenshots, playlist import/export, platform-specific packaging, and signed installers. The queue is currently in memory; OpenSubtitles credentials, subtitle associations, subtitle appearance, and updater preferences persist locally. HDR passthrough, disc menus, casting, and a plugin system are not implemented. On macOS the OpenGL player prefers VideoToolbox copy-back hardware decoding, with mpv auto/software fallback. Other platforms use mpv’s `auto-safe` policy. This does not guarantee zero-copy decoding.
 
 ## Validate
 

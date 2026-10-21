@@ -21,6 +21,8 @@ enum Action {
     Repeat,
     Fullscreen,
     Subtitle,
+    DownloadSubtitle,
+    SubtitleAppearance,
     Playlist,
     Info,
     Help,
@@ -315,6 +317,8 @@ impl PlayerApp {
             Action::Repeat => self.repeat = !self.repeat,
             Action::Fullscreen => self.toggle_fullscreen(&self.ctx.clone()),
             Action::Subtitle => self.pick(true),
+            Action::DownloadSubtitle => self.open_subtitle_search(),
+            Action::SubtitleAppearance => self.open_subtitle_controls(),
             Action::Playlist => self.show_playlist = !self.show_playlist,
             Action::Info => self.show_info = !self.show_info,
             Action::Help => self.show_help = true,
@@ -422,7 +426,9 @@ impl PlayerApp {
                 ),
             ],
             vec![
+                Entry::item("Download Subtitle…", DownloadSubtitle).enabled(available),
                 Entry::item("Add Subtitle File…", Subtitle).enabled(available && !self.dialog_busy),
+                Entry::item("Subtitle appearance…", SubtitleAppearance),
                 Entry::submenu("Subtitle Track", tracks("sub", "sid")),
                 Entry::command("Show subtitles", &["cycle", "sub-visibility"])
                     .checked(state.is_some_and(|s| s.subtitles_visible))
@@ -479,6 +485,9 @@ mod tests {
         assert!(entries[0][2].shift);
         assert_eq!(entries[0][2].action, Some(Action::SearchMovies));
         assert!(!entries[1][0].enabled);
+        assert_eq!(entries[4][0].title, "Download Subtitle…");
+        assert_eq!(entries[4][0].action, Some(Action::DownloadSubtitle));
+        assert!(!entries[4][0].enabled);
         app.activate_test_menu(&["Playlist"]);
         app.activate_test_menu(&["Repeat playlist"]);
         app.activate_test_menu(&["Playback information"]);

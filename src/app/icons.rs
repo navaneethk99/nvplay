@@ -95,17 +95,19 @@ fn sized_button(
                 line(p(5.0 * direction, -5.0), p(5.0 * direction, 5.0));
             }
             Icon::RotateClockwise => {
-                let points = (0..=24)
+                let arc = (0..=32)
                     .map(|step| {
-                        let angle = -std::f32::consts::FRAC_PI_2 - std::f32::consts::TAU * 0.8
-                            + std::f32::consts::TAU * (0.8 * step as f32 / 24.0);
-                        p(6.0 * angle.cos(), 6.0 * angle.sin())
+                        let angle = std::f32::consts::FRAC_PI_4
+                            + std::f32::consts::TAU * 0.75 * step as f32 / 32.0;
+                        p(5.5 * angle.cos(), 5.5 * angle.sin())
                     })
                     .collect();
-                ui.painter().add(egui::Shape::line(points, stroke));
-                // Arrowhead at the top points right, following clockwise motion.
-                line(p(-3.0, -9.0), p(0.0, -6.0));
-                line(p(-3.0, -3.0), p(0.0, -6.0));
+                ui.painter().add(egui::Shape::line(arc, stroke));
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![p(6.0, -2.0), p(0.5, -3.5), p(4.5, -7.5)],
+                    color,
+                    Stroke::NONE,
+                ));
             }
             Icon::Fullscreen => {
                 for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {

@@ -236,6 +236,7 @@ impl MovieSearch {
 
 impl super::PlayerApp {
     pub(super) fn open_movie_search(&mut self) {
+        self.subtitle_search.close();
         self.show_url = false;
         self.show_help = false;
         self.movie_search.open();

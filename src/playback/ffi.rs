@@ -111,6 +111,10 @@ api! {
     set_option_string: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> c_int,
     command_async: unsafe extern "C" fn(*mut c_void, u64, *const *const c_char) -> c_int,
     observe_property: unsafe extern "C" fn(*mut c_void, u64, *const c_char, c_int) -> c_int,
+    #[cfg(test)]
+    get_property_string: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
+    #[cfg(test)]
+    free: unsafe extern "C" fn(*mut c_void),
     get_property_async: unsafe extern "C" fn(*mut c_void, u64, *const c_char, c_int) -> c_int,
     request_log_messages: unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int,
     set_wakeup_callback: unsafe extern "C" fn(*mut c_void, Option<unsafe extern "C" fn(*mut c_void)>, *mut c_void),

@@ -4,6 +4,7 @@ mod playback;
 #[cfg(target_os = "macos")]
 mod source_version;
 mod streaming;
+mod subtitles;
 
 fn main() -> eframe::Result {
     let media = std::env::args_os().skip(1).collect();
