@@ -516,7 +516,8 @@ mod tests {
                     _ => None,
                 })
                 .expect("video surface");
-            assert_eq!(video.top(), ctx.content_rect().top());
+            let topbar_height = if fullscreen { 0.0 } else { 34.0 };
+            assert_eq!(video.top(), ctx.content_rect().top() + topbar_height);
         }
     }
 }

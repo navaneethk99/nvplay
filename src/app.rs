@@ -24,6 +24,7 @@ use std::{
 };
 
 const ACCENT: Color32 = Color32::from_rgb(217, 132, 34);
+const BAR_BACKGROUND: Color32 = Color32::from_rgb(29, 29, 29);
 
 #[derive(Clone)]
 struct Media {
@@ -46,6 +47,7 @@ impl Media {
 enum DialogResult {
     Media(Vec<PathBuf>),
     Subtitle(PathBuf),
+    Folder(Result<Vec<PathBuf>, String>),
 }
 
 struct DialogWake(egui::Context);
@@ -104,6 +106,8 @@ struct ControlRects {
     seek: Option<egui::Rect>,
     volume: Option<egui::Rect>,
     play: Option<egui::Rect>,
+    skip_backward: Option<egui::Rect>,
+    skip_forward: Option<egui::Rect>,
     mute: Option<egui::Rect>,
     stop: Option<egui::Rect>,
 }
@@ -275,6 +279,39 @@ impl PlayerApp {
         });
         self.ctx.request_repaint();
     }
+    fn pick_folder(&mut self) {
+        if self.dialog_busy {
+            return;
+        }
+        self.dialog_busy = true;
+        let ctx = self.ctx.clone();
+        self.dialog = Some(Box::pin(async move {
+            let Some(folder) = rfd::AsyncFileDialog::new()
+                .set_title("Add video folder to playlist")
+                .pick_folder()
+                .await
+            else {
+                return DialogResult::Folder(Ok(Vec::new()));
+            };
+            let path = folder.path().to_path_buf();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send(folder_videos(&path));
+                ctx.request_repaint();
+            });
+            let result = std::future::poll_fn(move |_| match receiver.try_recv() {
+                Ok(result) => Poll::Ready(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => Poll::Pending,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Poll::Ready(Err("Could not finish reading the video folder.".into()))
+                }
+            })
+            .await;
+            DialogResult::Folder(result)
+        }));
+        self.ctx.request_repaint();
+    }
+
     fn poll_dialog(&mut self) {
         let waker = Waker::from(Arc::new(DialogWake(self.ctx.clone())));
         let result = self
@@ -286,6 +323,8 @@ impl PlayerApp {
             self.dialog_busy = false;
             match result {
                 DialogResult::Media(paths) => self.add_paths(paths),
+                DialogResult::Folder(Ok(paths)) => self.enqueue_paths(paths, false),
+                DialogResult::Folder(Err(error)) => self.error = Some(error),
                 DialogResult::Subtitle(path) => match path.to_str() {
                     Some(path) => self.command(&["sub-add", path, "select"]),
                     None => self.error = Some("The subtitle path is not valid Unicode".into()),
@@ -295,6 +334,10 @@ impl PlayerApp {
     }
 
     fn add_paths(&mut self, paths: Vec<PathBuf>) {
+        self.enqueue_paths(paths, true);
+    }
+
+    fn enqueue_paths(&mut self, paths: Vec<PathBuf>, autoplay: bool) {
         let start = self.queue.len();
         for path in paths {
             match path.into_os_string().into_string() {
@@ -306,7 +349,7 @@ impl PlayerApp {
                 }
             }
         }
-        if self.queue.len() > start {
+        if autoplay && self.queue.len() > start {
             self.play(start);
         }
     }
@@ -541,11 +584,24 @@ impl PlayerApp {
             .open(&mut open)
             .default_size([320.0, 200.0])
             .show(ctx, |ui| {
+                if ui
+                    .add_enabled(!self.dialog_busy, egui::Button::new("Add Folder…"))
+                    .on_hover_text("Add videos from a folder and its subfolders")
+                    .clicked()
+                {
+                    self.pick_folder();
+                }
+                if self.dialog_busy {
+                    ui.label("Waiting for folder or scanning videos…");
+                }
+                ui.separator();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if self.queue.is_empty() {
-                            ui.label("Playlist is empty. Open a file or network stream.");
+                            ui.label(
+                                "Playlist is empty. Add a folder, open a file or network stream.",
+                            );
                         }
                         for (index, media) in self.queue.iter().enumerate() {
                             ui.horizontal(|ui| {
@@ -587,11 +643,76 @@ impl PlayerApp {
         }
     }
 
+    fn topbar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("topbar")
+            .frame(
+                egui::Frame::new()
+                    .fill(BAR_BACKGROUND)
+                    .inner_margin(egui::Margin::symmetric(6, 3)),
+            )
+            .show(ctx, |ui| self.topbar_contents(ui));
+    }
+
+    fn topbar_contents(&mut self, ui: &mut egui::Ui) {
+        bar_style(ui);
+        let ctx = ui.ctx().clone();
+        let idle = self.player.as_ref().is_none_or(|p| p.state.idle);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            if icons::button(
+                ui,
+                Icon::Playlist,
+                "Playlist (Ctrl/Cmd+L)",
+                self.show_playlist,
+            )
+            .clicked()
+            {
+                self.show_playlist = !self.show_playlist;
+            }
+            let has_previous = self.current.is_some_and(|i| i > 0);
+            let has_next = next_index(self.current, self.queue.len(), self.repeat).is_some();
+            if ui
+                .add_enabled_ui(has_previous, |ui| {
+                    icons::button(ui, Icon::Previous, "Previous", false)
+                })
+                .inner
+                .clicked()
+            {
+                self.previous();
+            }
+            if ui
+                .add_enabled_ui(has_next, |ui| icons::button(ui, Icon::Next, "Next", false))
+                .inner
+                .clicked()
+            {
+                self.next();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if icons::button(ui, Icon::Fullscreen, "Fullscreen (F)", self.fullscreen).clicked()
+                {
+                    self.toggle_fullscreen(&ctx);
+                }
+                let stop = ui
+                    .add_enabled_ui(self.loading || !idle, |ui| {
+                        icons::button(ui, Icon::Stop, "Stop / Cancel stream", false)
+                    })
+                    .inner;
+                #[cfg(test)]
+                {
+                    self.control_rects.stop = Some(stop.rect);
+                }
+                if stop.clicked() {
+                    self.stop();
+                }
+            });
+        });
+    }
+
     fn controls(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("controls")
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::from_gray(239))
+                    .fill(BAR_BACKGROUND)
                     .inner_margin(egui::Margin::symmetric(6, 3)),
             )
             .show(ctx, |ui| self.controls_contents(ui));
@@ -606,6 +727,7 @@ impl PlayerApp {
         self.pending_volume = Some((volume, Instant::now()));
     }
     fn controls_contents(&mut self, ui: &mut egui::Ui) {
+        bar_style(ui);
         let ctx = ui.ctx().clone();
         let state = self.player.as_ref().map(|p| &p.state);
         let (position, duration, paused, volume, idle, buffering, seekable, muted) = state
@@ -635,21 +757,23 @@ impl PlayerApp {
             let show_volume_value = ui.available_width() >= 560.0;
             let volume_width = if show_volume_value { 48.0 } else { 32.0 };
             let show_duration = ui.available_width() >= 500.0;
-            let right_width = 155.0
+            let right_width = 62.0
                 + volume_width
                 + if show_volume_value { 35.0 } else { 0.0 }
                 + if self.loading || buffering { 19.0 } else { 0.0 };
             let timeline_width = (ui.available_width() - 90.0 - right_width - 12.0).max(20.0);
-            let has_previous = self.current.is_some_and(|i| i > 0);
-            let has_next = next_index(self.current, self.queue.len(), self.repeat).is_some();
-            if ui
-                .add_enabled_ui(has_previous, |ui| {
-                    icons::button(ui, Icon::Previous, "Previous", false)
+            let can_skip = seekable && !idle && !self.loading;
+            let backward = ui
+                .add_enabled_ui(can_skip, |ui| {
+                    icons::button(ui, Icon::SkipBackward, "Skip backward 5 seconds (←)", false)
                 })
-                .inner
-                .clicked()
+                .inner;
+            #[cfg(test)]
             {
-                self.previous();
+                self.control_rects.skip_backward = Some(backward.rect);
+            }
+            if backward.clicked() {
+                self.command(&["seek", "-5", "relative+exact"]);
             }
             let play = ui
                 .add_enabled_ui(self.player.is_some(), |ui| {
@@ -676,12 +800,17 @@ impl PlayerApp {
                     self.toggle_pause();
                 }
             }
-            if ui
-                .add_enabled_ui(has_next, |ui| icons::button(ui, Icon::Next, "Next", false))
-                .inner
-                .clicked()
+            let forward = ui
+                .add_enabled_ui(can_skip, |ui| {
+                    icons::button(ui, Icon::SkipForward, "Skip forward 5 seconds (→)", false)
+                })
+                .inner;
+            #[cfg(test)]
             {
-                self.next();
+                self.control_rects.skip_forward = Some(forward.rect);
+            }
+            if forward.clicked() {
+                self.command(&["seek", "5", "relative+exact"]);
             }
             ui.add_space(3.0);
             ui.allocate_ui_with_layout(
@@ -829,31 +958,6 @@ impl PlayerApp {
                 },
             );
             ui.add_space(3.0);
-            let stop = ui
-                .add_enabled_ui(self.loading || !idle, |ui| {
-                    icons::button(ui, Icon::Stop, "Stop / Cancel stream", false)
-                })
-                .inner;
-            #[cfg(test)]
-            {
-                self.control_rects.stop = Some(stop.rect);
-            }
-            if stop.clicked() {
-                self.stop();
-            }
-            if icons::button(ui, Icon::Fullscreen, "Fullscreen (F)", self.fullscreen).clicked() {
-                self.toggle_fullscreen(&ctx);
-            }
-            if icons::button(
-                ui,
-                Icon::Playlist,
-                "Playlist (Ctrl/Cmd+L)",
-                self.show_playlist,
-            )
-            .clicked()
-            {
-                self.show_playlist = !self.show_playlist;
-            }
             if icons::button(ui, Icon::Repeat, "Repeat playlist", self.repeat).clicked() {
                 self.repeat = !self.repeat;
             }
@@ -868,7 +972,7 @@ impl PlayerApp {
                             .color(if muted {
                                 Color32::GRAY
                             } else {
-                                Color32::from_gray(30)
+                                Color32::from_gray(200)
                             }),
                     );
                 }
@@ -952,18 +1056,19 @@ impl PlayerApp {
 
     fn fullscreen_controls(&mut self, ctx: &egui::Context) {
         let screen = ctx.content_rect();
-        #[cfg(not(target_os = "macos"))]
-        egui::Area::new(egui::Id::new("fullscreen_menu"))
+        egui::Area::new(egui::Id::new("fullscreen_topbar"))
             .order(egui::Order::Foreground)
             .movable(false)
             .fixed_pos(screen.left_top())
             .show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(Color32::from_gray(242))
-                    .inner_margin(egui::Margin::symmetric(5, 1))
+                    .fill(BAR_BACKGROUND)
+                    .inner_margin(egui::Margin::symmetric(6, 3))
                     .show(ui, |ui| {
-                        ui.set_width(screen.width() - 10.0);
+                        ui.set_width(screen.width() - 12.0);
+                        #[cfg(not(target_os = "macos"))]
                         self.menu_contents(ui);
+                        self.topbar_contents(ui);
                     });
             });
         egui::Area::new(egui::Id::new("fullscreen_transport"))
@@ -972,7 +1077,7 @@ impl PlayerApp {
             .fixed_pos(egui::pos2(screen.left(), screen.bottom() - 34.0))
             .show(ctx, |ui| {
                 egui::Frame::new()
-                    .fill(Color32::from_gray(239))
+                    .fill(BAR_BACKGROUND)
                     .inner_margin(egui::Margin::symmetric(6, 3))
                     .show(ui, |ui| {
                         ui.set_width(screen.width() - 12.0);
@@ -1343,6 +1448,7 @@ impl PlayerApp {
         if !self.fullscreen {
             #[cfg(not(target_os = "macos"))]
             self.menu(ctx);
+            self.topbar(ctx);
             self.controls(ctx);
         }
         self.video(ctx);
@@ -1431,6 +1537,69 @@ impl eframe::App for PlayerApp {
     }
 }
 
+fn folder_videos(folder: &std::path::Path) -> Result<Vec<PathBuf>, String> {
+    let mut folders = vec![folder.to_path_buf()];
+    let mut videos = Vec::new();
+    while let Some(directory) = folders.pop() {
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|error| format!("Could not read {}: {error}", directory.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("Could not read folder entry: {error}"))?;
+            let kind = entry
+                .file_type()
+                .map_err(|error| format!("Could not read {}: {error}", entry.path().display()))?;
+            let path = entry.path();
+            if kind.is_dir() {
+                folders.push(path);
+            } else if kind.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        matches!(
+                            extension.to_ascii_lowercase().as_str(),
+                            "mp4"
+                                | "mkv"
+                                | "avi"
+                                | "mov"
+                                | "webm"
+                                | "m4v"
+                                | "mpg"
+                                | "mpeg"
+                                | "ts"
+                                | "mts"
+                                | "m2ts"
+                                | "vob"
+                                | "wmv"
+                                | "flv"
+                                | "ogv"
+                                | "3gp"
+                                | "3g2"
+                                | "m2v"
+                                | "mpe"
+                                | "mxf"
+                                | "divx"
+                                | "f4v"
+                                | "asf"
+                        )
+                    })
+            {
+                videos.push(path);
+            }
+        }
+    }
+    videos.sort_by_cached_key(|path| {
+        (
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase(),
+            path.clone(),
+        )
+    });
+    Ok(videos)
+}
+
 fn next_index(current: Option<usize>, length: usize, repeat: bool) -> Option<usize> {
     if length == 0 {
         return None;
@@ -1459,6 +1628,23 @@ fn format_time(seconds: f64) -> String {
         format!("{:02}:{:02}", seconds / 60, seconds % 60)
     }
 }
+fn bar_style(ui: &mut egui::Ui) {
+    let visuals = ui.visuals_mut();
+    *visuals = egui::Visuals::dark();
+    visuals.panel_fill = BAR_BACKGROUND;
+    visuals.selection.bg_fill = Color32::from_rgb(78, 53, 27);
+    visuals.selection.stroke.color = ACCENT;
+    visuals.widgets.inactive.bg_fill = BAR_BACKGROUND;
+    visuals.widgets.inactive.weak_bg_fill = BAR_BACKGROUND;
+    for widget in [
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+    ] {
+        widget.corner_radius = egui::CornerRadius::same(2);
+    }
+}
+
 fn theme(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.visuals = egui::Visuals::light();
@@ -1497,6 +1683,61 @@ fn theme(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_import_filters_sorts_and_appends_without_changing_current_media() {
+        let root = std::env::temp_dir().join(format!(
+            "nvplay-folder-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        for name in [
+            "z.mp4",
+            "A.MKV",
+            "notes.txt",
+            "cover.jpg",
+            "nested/b.webm",
+            "nested/sub.srt",
+        ] {
+            std::fs::write(root.join(name), b"").unwrap();
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, root.join("nested/loop")).unwrap();
+        let paths = folder_videos(&root).unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                root.join("A.MKV"),
+                root.join("nested/b.webm"),
+                root.join("z.mp4")
+            ]
+        );
+        let ctx = egui::Context::default();
+        let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
+        app.queue.push(Media::new("existing.mp4".into()));
+        app.current = Some(0);
+        app.dialog_busy = true;
+        app.dialog = Some(Box::pin(async move { DialogResult::Folder(Ok(paths)) }));
+        app.poll_dialog();
+        assert!(!app.dialog_busy);
+        assert_eq!(app.current, Some(0));
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|media| media.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["existing.mp4", "A.MKV", "b.webm", "z.mp4"]
+        );
+        let empty = root.join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(folder_videos(&empty).unwrap().is_empty());
+        assert!(folder_videos(&root.join("missing")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn draw(app: &mut PlayerApp, events: Vec<egui::Event>) -> egui::FullOutput {
         let ctx = app.ctx.clone();
@@ -1759,11 +2000,13 @@ mod tests {
                 }
                 let rects = &app.control_rects;
                 let play = rects.play.unwrap();
+                let backward = rects.skip_backward.unwrap();
+                let forward = rects.skip_forward.unwrap();
                 let seek = rects.seek.unwrap();
                 let stop = rects.stop.unwrap();
                 let mute = rects.mute.unwrap();
                 let volume = rects.volume.unwrap();
-                for rect in [play, seek, stop, mute, volume] {
+                for rect in [backward, play, forward, seek, mute, volume] {
                     assert!(
                         (rect.center().y - play.center().y).abs() < 1.0,
                         "controls wrapped at {width}, fullscreen={fullscreen}: {rect:?}"
@@ -1774,9 +2017,13 @@ mod tests {
                     );
                     assert!(rect.bottom() <= 400.0);
                 }
-                assert!(play.right() < seek.left());
-                assert!(seek.right() < stop.left());
-                assert!(stop.right() < mute.left());
+                assert!(backward.right() < play.left());
+                assert!(play.right() < forward.left());
+                assert!(forward.right() < seek.left());
+                assert!(seek.right() < mute.left());
+                assert!(stop.bottom() < play.top());
+                assert!(stop.left() > width - 75.0);
+                assert!(stop.right() <= width);
                 assert!(mute.right() < volume.left());
                 assert_eq!(play.height(), 28.0);
                 assert_eq!(play.width(), play.height());

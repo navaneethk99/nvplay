@@ -5,6 +5,8 @@ pub enum Icon {
     Play,
     Pause,
     Stop,
+    SkipBackward,
+    SkipForward,
     Previous,
     Next,
     Fullscreen,
@@ -20,8 +22,7 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, help: &str, selected: bool) -> egui
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), help));
     if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact(&response);
-        let color = visuals.fg_stroke.color;
+        let color = super::ACCENT;
         let stroke = Stroke::new(1.4_f32, color);
         let center = rect.center();
         let p = |x, y| center + vec2(x, y);
@@ -56,6 +57,15 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, help: &str, selected: bool) -> egui
                     0.0,
                     color,
                 );
+            }
+            Icon::SkipBackward | Icon::SkipForward => {
+                let direction = if matches!(icon, Icon::SkipBackward) {
+                    -1.0
+                } else {
+                    1.0
+                };
+                triangle(-4.0 * direction, direction);
+                triangle(3.0 * direction, direction);
             }
             Icon::Previous | Icon::Next => {
                 let direction = if matches!(icon, Icon::Previous) {
