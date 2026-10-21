@@ -133,7 +133,9 @@ impl Player {
             // and displaying them without the render API's normal timing wait.
             ("video-sync", "audio"),
             ("video-timing-offset", "0"),
-            ("volume", "70"),
+            ("volume", "100"),
+            // Keep software volume responsive instead of buffering 200 ms of old gain.
+            ("audio-buffer", "0.05"),
             ("ytdl", "yes"),
             ("load-scripts", "no"),
             ("network-timeout", "20"),
@@ -242,7 +244,7 @@ impl Player {
             cinejoy_playlist: None,
             stream_quality: streaming::Quality::default(),
             state: PlaybackState {
-                volume: 70.0,
+                volume: 100.0,
                 speed: 1.0,
                 idle: true,
                 ..Default::default()
@@ -800,6 +802,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(loaded && player.state.duration > 0.0, "video never loaded");
+        assert_eq!(player.state.volume, 100.0, "startup volume");
         player.command(&["set", "pause", "yes"]).unwrap();
         player.command(&["seek", "1", "absolute+exact"]).unwrap();
         player.command(&["set", "volume", "42"]).unwrap();

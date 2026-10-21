@@ -162,7 +162,7 @@ impl MovieSearch {
                     });
                 }
                 if let Some(error) = self.error.clone() {
-                    ui.label(RichText::new(error).color(Color32::from_rgb(180, 45, 35)));
+                    ui.label(RichText::new(error).color(Color32::from_rgb(240, 100, 85)));
                     if ui.button("Try again").clicked() { self.start(); }
                 }
                 if self.results.is_empty() {
@@ -184,7 +184,7 @@ impl MovieSearch {
                                     if let Some(texture) = movie.poster_url().and_then(|url| self.posters.get(&url, ctx)) {
                                         egui::Image::new((texture.id(), texture.size_vec2())).fit_to_exact_size(poster.size()).corner_radius(3.0).paint_at(ui, poster);
                                     } else {
-                                        ui.painter().rect_filled(poster, 3.0, Color32::from_gray(210));
+                                        ui.painter().rect_filled(poster, 3.0, Color32::from_gray(40));
                                         ui.painter().text(poster.center(), egui::Align2::CENTER_CENTER, "—", egui::FontId::proportional(16.0), Color32::from_gray(130));
                                     }
                                     let title = egui::Rect::from_min_max(rect.min + egui::vec2(56.0, 13.0), egui::pos2(rect.right() - 10.0, rect.top() + 35.0));

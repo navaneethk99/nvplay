@@ -10,14 +10,32 @@ pub enum Icon {
     Previous,
     Next,
     Fullscreen,
+    RotateClockwise,
     Playlist,
     Repeat,
+    Up,
+    Down,
+    Close,
     Volume,
     Muted,
 }
 
 pub fn button(ui: &mut egui::Ui, icon: Icon, help: &str, selected: bool) -> egui::Response {
-    let response = ui.add_sized([28.0, 28.0], egui::Button::new("").selected(selected));
+    sized_button(ui, icon, help, selected, 28.0)
+}
+
+pub fn small_button(ui: &mut egui::Ui, icon: Icon, help: &str) -> egui::Response {
+    sized_button(ui, icon, help, false, 22.0)
+}
+
+fn sized_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    help: &str,
+    selected: bool,
+    size: f32,
+) -> egui::Response {
+    let response = ui.add_sized([size, size], egui::Button::new("").selected(selected));
     let rect = response.rect;
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), help));
@@ -76,6 +94,19 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, help: &str, selected: bool) -> egui
                 triangle(-direction, direction);
                 line(p(5.0 * direction, -5.0), p(5.0 * direction, 5.0));
             }
+            Icon::RotateClockwise => {
+                let points = (0..=24)
+                    .map(|step| {
+                        let angle = -std::f32::consts::FRAC_PI_2 - std::f32::consts::TAU * 0.8
+                            + std::f32::consts::TAU * (0.8 * step as f32 / 24.0);
+                        p(6.0 * angle.cos(), 6.0 * angle.sin())
+                    })
+                    .collect();
+                ui.painter().add(egui::Shape::line(points, stroke));
+                // Arrowhead at the top points right, following clockwise motion.
+                line(p(-3.0, -9.0), p(0.0, -6.0));
+                line(p(-3.0, -3.0), p(0.0, -6.0));
+            }
             Icon::Fullscreen => {
                 for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
                     line(p(x * 6.0, y * 2.0), p(x * 6.0, y * 6.0));
@@ -83,10 +114,23 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, help: &str, selected: bool) -> egui
                 }
             }
             Icon::Playlist => {
-                for y in [-4.0, 0.0, 4.0] {
-                    line(p(-2.0, y), p(6.0, y));
-                    ui.painter().circle_filled(p(-5.0, y), 0.9, color);
-                }
+                ui.painter().rect_stroke(
+                    egui::Rect::from_min_max(p(-7.0, -6.0), p(7.0, 6.0)),
+                    1.0,
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+                line(p(-2.0, -6.0), p(-2.0, 6.0));
+            }
+            Icon::Up | Icon::Down => {
+                let direction = if matches!(icon, Icon::Up) { -1.0 } else { 1.0 };
+                line(p(0.0, -5.0 * direction), p(0.0, 5.0 * direction));
+                line(p(-4.0, direction), p(0.0, 5.0 * direction));
+                line(p(4.0, direction), p(0.0, 5.0 * direction));
+            }
+            Icon::Close => {
+                line(p(-4.0, -4.0), p(4.0, 4.0));
+                line(p(-4.0, 4.0), p(4.0, -4.0));
             }
             Icon::Repeat => {
                 for direction in [-1.0, 1.0] {

@@ -110,6 +110,7 @@ struct ControlRects {
     skip_forward: Option<egui::Rect>,
     mute: Option<egui::Rect>,
     stop: Option<egui::Rect>,
+    preview_time: Option<egui::Rect>,
 }
 
 impl PlayerApp {
@@ -411,14 +412,15 @@ impl PlayerApp {
                     3 => self.toggle_fullscreen(ctx),
                     4 => self.command(&["cycle", "mute"]),
                     5 | 6 => {
-                        let volume = self.player.as_ref().map_or(70.0, |p| p.state.volume);
-                        self.command(&[
-                            "set",
-                            "volume",
-                            &(volume + if action == 5 { 5.0 } else { -5.0 })
-                                .clamp(0.0, 100.0)
-                                .to_string(),
-                        ]);
+                        let volume =
+                            self.pending_volume
+                                .map(|pending| pending.0)
+                                .unwrap_or_else(|| {
+                                    self.player.as_ref().map_or(100.0, |p| p.state.volume)
+                                });
+                        self.set_volume(
+                            (volume + if action == 5 { 5.0 } else { -5.0 }).clamp(0.0, 100.0),
+                        );
                     }
                     _ => {}
                 }
@@ -438,7 +440,7 @@ impl PlayerApp {
         egui::TopBottomPanel::top("menu")
             .frame(
                 egui::Frame::new()
-                    .fill(Color32::from_gray(242))
+                    .fill(BAR_BACKGROUND)
                     .inner_margin(egui::Margin::symmetric(5, 1)),
             )
             .show(ctx, |ui| self.menu_contents(ui));
@@ -576,14 +578,33 @@ impl PlayerApp {
         if !self.show_playlist {
             return;
         }
-        let mut open = true;
         let mut play = None;
         let mut remove = None;
-        egui::Window::new(format!("Playlist ({})", self.queue.len()))
-            .id(egui::Id::new("playlist_window"))
-            .open(&mut open)
-            .default_size([320.0, 200.0])
+        let mut move_item = None;
+        egui::SidePanel::left("playlist_sidebar")
+            .default_width(280.0)
+            .width_range(200.0..=(ctx.available_rect().width() * 0.6).max(200.0))
+            .resizable(true)
+            .frame(egui::Frame::new().fill(BAR_BACKGROUND).inner_margin(8.0))
             .show(ctx, |ui| {
+                if self.fullscreen {
+                    // Fullscreen controls overlay the top and bottom of the video.
+                    ui.add_space(if cfg!(target_os = "macos") {
+                        34.0
+                    } else {
+                        58.0
+                    });
+                }
+                ui.horizontal(|ui| {
+                    ui.strong(format!("Playlist ({})", self.queue.len()));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icons::small_button(ui, Icon::Close, "Close playlist sidebar").clicked()
+                        {
+                            self.show_playlist = false;
+                        }
+                    });
+                });
+                ui.separator();
                 if ui
                     .add_enabled(!self.dialog_busy, egui::Button::new("Add Folder…"))
                     .on_hover_text("Add videos from a folder and its subfolders")
@@ -591,12 +612,34 @@ impl PlayerApp {
                 {
                     self.pick_folder();
                 }
+                ui.menu_button("Sort playlist", |ui| {
+                    for (label, sort) in [
+                        ("Name (A–Z)", PlaylistSort::Name),
+                        ("Name (Z–A)", PlaylistSort::NameDescending),
+                        ("Folder / path", PlaylistSort::Path),
+                        ("File type", PlaylistSort::FileType),
+                        ("Date modified (newest first)", PlaylistSort::Newest),
+                        ("Date modified (oldest first)", PlaylistSort::Oldest),
+                        ("Size (largest first)", PlaylistSort::Largest),
+                        ("Size (smallest first)", PlaylistSort::Smallest),
+                        ("Reverse order", PlaylistSort::Reverse),
+                        ("Shuffle", PlaylistSort::Shuffle),
+                    ] {
+                        if ui.button(label).clicked() {
+                            self.sort_playlist(sort);
+                            ui.close();
+                        }
+                    }
+                });
                 if self.dialog_busy {
                     ui.label("Waiting for folder or scanning videos…");
                 }
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
+                    .max_height(
+                        (ui.available_height() - if self.fullscreen { 34.0 } else { 0.0 }).max(0.0),
+                    )
                     .show(ui, |ui| {
                         if self.queue.is_empty() {
                             ui.label(
@@ -606,7 +649,7 @@ impl PlayerApp {
                         for (index, media) in self.queue.iter().enumerate() {
                             ui.horizontal(|ui| {
                                 let selected = self.current == Some(index);
-                                let width = (ui.available_width() - 24.0).max(30.0);
+                                let width = (ui.available_width() - 78.0).max(30.0);
                                 if ui
                                     .add_sized(
                                         [width, 21.0],
@@ -619,16 +662,45 @@ impl PlayerApp {
                                 {
                                     play = Some(index);
                                 }
-                                if ui.small_button("×").on_hover_text("Remove").clicked() {
+                                if ui
+                                    .add_enabled_ui(index > 0, |ui| {
+                                        icons::small_button(ui, Icon::Up, "Move up")
+                                    })
+                                    .inner
+                                    .clicked()
+                                {
+                                    move_item = Some((index, index - 1));
+                                }
+                                if ui
+                                    .add_enabled_ui(index + 1 < self.queue.len(), |ui| {
+                                        icons::small_button(ui, Icon::Down, "Move down")
+                                    })
+                                    .inner
+                                    .clicked()
+                                {
+                                    move_item = Some((index, index + 1));
+                                }
+                                if icons::small_button(ui, Icon::Close, "Remove").clicked() {
                                     remove = Some(index);
                                 }
                             });
                         }
                     });
             });
-        self.show_playlist = open;
         if let Some(index) = play {
             self.play(index);
+        }
+        if let Some((from, to)) = move_item {
+            self.queue.swap(from, to);
+            self.current = self.current.map(|current| {
+                if current == from {
+                    to
+                } else if current == to {
+                    from
+                } else {
+                    current
+                }
+            });
         }
         if let Some(index) = remove {
             self.queue.remove(index);
@@ -641,6 +713,88 @@ impl PlayerApp {
                 _ => {}
             }
         }
+    }
+
+    fn sort_playlist(&mut self, sort: PlaylistSort) {
+        let mut entries: Vec<_> = self
+            .queue
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, media)| {
+                let metadata = if matches!(
+                    sort,
+                    PlaylistSort::Newest
+                        | PlaylistSort::Oldest
+                        | PlaylistSort::Largest
+                        | PlaylistSort::Smallest
+                ) {
+                    std::fs::metadata(&media.source).ok()
+                } else {
+                    None
+                };
+                let modified = metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.modified().ok());
+                let size = metadata.as_ref().map(|metadata| metadata.len());
+                (index, media, modified, size)
+            })
+            .collect();
+        match sort {
+            PlaylistSort::Reverse => entries.reverse(),
+            PlaylistSort::Shuffle => {
+                let mut seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64
+                    | 1;
+                for index in (1..entries.len()).rev() {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    entries.swap(index, seed as usize % (index + 1));
+                }
+            }
+            _ => entries.sort_by(|a, b| {
+                let names = || natural_compare(&a.1.name, &b.1.name);
+                match sort {
+                    PlaylistSort::Name => names(),
+                    PlaylistSort::NameDescending => names().reverse(),
+                    PlaylistSort::Path => natural_compare(&a.1.source, &b.1.source),
+                    PlaylistSort::FileType => {
+                        let extension = |source: &str| {
+                            PathBuf::from(source)
+                                .extension()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_lowercase()
+                        };
+                        extension(&a.1.source)
+                            .cmp(&extension(&b.1.source))
+                            .then_with(names)
+                    }
+                    PlaylistSort::Newest => b.2.cmp(&a.2).then_with(names),
+                    PlaylistSort::Oldest => {
+                        a.2.is_none()
+                            .cmp(&b.2.is_none())
+                            .then(a.2.cmp(&b.2))
+                            .then_with(names)
+                    }
+                    PlaylistSort::Largest => b.3.cmp(&a.3).then_with(names),
+                    PlaylistSort::Smallest => {
+                        a.3.is_none()
+                            .cmp(&b.3.is_none())
+                            .then(a.3.cmp(&b.3))
+                            .then_with(names)
+                    }
+                    _ => std::cmp::Ordering::Equal,
+                }
+            }),
+        }
+        self.current = self
+            .current
+            .and_then(|current| entries.iter().position(|entry| entry.0 == current));
+        self.queue = entries.into_iter().map(|entry| entry.1).collect();
     }
 
     fn topbar(&mut self, ctx: &egui::Context) {
@@ -662,7 +816,7 @@ impl PlayerApp {
             if icons::button(
                 ui,
                 Icon::Playlist,
-                "Playlist (Ctrl/Cmd+L)",
+                "Playlist sidebar (Ctrl/Cmd+L)",
                 self.show_playlist,
             )
             .clicked()
@@ -680,6 +834,9 @@ impl PlayerApp {
             {
                 self.previous();
             }
+            if icons::button(ui, Icon::Repeat, "Repeat playlist", self.repeat).clicked() {
+                self.repeat = !self.repeat;
+            }
             if ui
                 .add_enabled_ui(has_next, |ui| icons::button(ui, Icon::Next, "Next", false))
                 .inner
@@ -691,6 +848,23 @@ impl PlayerApp {
                 if icons::button(ui, Icon::Fullscreen, "Fullscreen (F)", self.fullscreen).clicked()
                 {
                     self.toggle_fullscreen(&ctx);
+                }
+                let can_rotate = self.player.as_ref().is_some_and(|player| {
+                    !player.state.idle
+                        && player
+                            .state
+                            .tracks
+                            .iter()
+                            .any(|track| track.kind == "video" && track.selected)
+                });
+                if ui
+                    .add_enabled_ui(can_rotate, |ui| {
+                        icons::button(ui, Icon::RotateClockwise, "Rotate clockwise 90°", false)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    self.command(&["cycle-values", "video-rotate", "90", "180", "270", "0"]);
                 }
                 let stop = ui
                     .add_enabled_ui(self.loading || !idle, |ui| {
@@ -725,6 +899,7 @@ impl PlayerApp {
     fn set_volume(&mut self, volume: f64) {
         self.command(&["set", "volume", &volume.to_string()]);
         self.pending_volume = Some((volume, Instant::now()));
+        self.ctx.request_repaint();
     }
     fn controls_contents(&mut self, ui: &mut egui::Ui) {
         bar_style(ui);
@@ -743,7 +918,7 @@ impl PlayerApp {
                     s.muted,
                 )
             })
-            .unwrap_or((0.0, 0.0, true, 70.0, true, false, false, false));
+            .unwrap_or((0.0, 0.0, true, 100.0, true, false, false, false));
         let display_position = self
             .seek_preview
             .or(self.pending_seek.map(|p| p.0))
@@ -757,7 +932,7 @@ impl PlayerApp {
             let show_volume_value = ui.available_width() >= 560.0;
             let volume_width = if show_volume_value { 48.0 } else { 32.0 };
             let show_duration = ui.available_width() >= 500.0;
-            let right_width = 62.0
+            let right_width = 31.0
                 + volume_width
                 + if show_volume_value { 35.0 } else { 0.0 }
                 + if self.loading || buffering { 19.0 } else { 0.0 };
@@ -918,32 +1093,15 @@ impl PlayerApp {
                                         .unwrap_or(0)
                                 })
                                 .unwrap_or(0);
-                            let anchor = egui::Rect::from_min_max(
-                                egui::pos2(pointer.x, response.rect.top()),
-                                egui::pos2(pointer.x, response.rect.bottom()),
+                            self.timeline_preview(
+                                &ctx,
+                                response.id,
+                                pointer.x,
+                                response.rect.top(),
+                                source.as_deref(),
+                                seconds,
+                                video_track,
                             );
-                            egui::Tooltip::always_open(
-                                ctx.clone(),
-                                response.layer_id,
-                                response.id.with("frame-preview"),
-                                anchor,
-                            )
-                            .gap(6.0)
-                            .width(160.0)
-                            .layout(egui::Layout::top_down(egui::Align::Center))
-                            .show(|ui| {
-                                if let Some(source) = source {
-                                    self.frame_preview.show(ui, &source, seconds, video_track);
-                                }
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{}.{:03}",
-                                        format_time(seconds),
-                                        (seconds.fract() * 1000.0).floor() as u32
-                                    ))
-                                    .monospace(),
-                                );
-                            });
                         } else {
                             response.on_hover_text(if idle {
                                 "Open media to seek"
@@ -958,22 +1116,24 @@ impl PlayerApp {
                 },
             );
             ui.add_space(3.0);
-            if icons::button(ui, Icon::Repeat, "Repeat playlist", self.repeat).clicked() {
-                self.repeat = !self.repeat;
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.visuals_mut().selection.bg_fill = ACCENT;
                 ui.spacing_mut().slider_width = volume_width;
                 let mut volume = display_volume;
                 if show_volume_value {
-                    ui.label(
-                        RichText::new(format!("{volume:.0}%"))
-                            .size(10.0)
-                            .color(if muted {
-                                Color32::GRAY
-                            } else {
-                                Color32::from_gray(200)
-                            }),
+                    ui.add_sized(
+                        [35.0, 28.0],
+                        egui::Label::new(
+                            RichText::new(format!("{volume:.0}%"))
+                                .monospace()
+                                .size(10.0)
+                                .color(if muted {
+                                    Color32::GRAY
+                                } else {
+                                    Color32::from_gray(200)
+                                }),
+                        )
+                        .halign(egui::Align::RIGHT),
                     );
                 }
                 let response = ui.add_enabled(
@@ -1019,6 +1179,68 @@ impl PlayerApp {
                 }
             });
         });
+    }
+
+    fn timeline_preview(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        pointer_x: f32,
+        timeline_top: f32,
+        source: Option<&str>,
+        seconds: f64,
+        track: usize,
+    ) {
+        let screen = ctx.content_rect();
+        let card_size = egui::vec2(174.0, 126.0);
+        let left = (pointer_x - card_size.x / 2.0).clamp(
+            screen.left(),
+            (screen.right() - card_size.x).max(screen.left()),
+        );
+        let top = (timeline_top - card_size.y - 6.0).max(screen.top());
+        egui::Area::new(id.with("frame-preview"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(egui::pos2(left, top))
+            .movable(false)
+            .interactable(false)
+            .constrain(false)
+            .fade_in(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(6.0)
+                    .show(ui, |ui| {
+                        ui.set_width(160.0);
+                        ui.set_min_height(112.0);
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(160.0, 90.0),
+                                egui::Layout::top_down(egui::Align::Center),
+                                |ui| {
+                                    if let Some(source) = source {
+                                        self.frame_preview.show(ui, source, seconds, track);
+                                    }
+                                },
+                            );
+                            let timestamp = ui.add_sized(
+                                [160.0, 19.0],
+                                egui::Label::new(
+                                    RichText::new(format!(
+                                        "{}.{:03}",
+                                        format_time(seconds),
+                                        (seconds.fract() * 1000.0).floor() as u32
+                                    ))
+                                    .monospace(),
+                                ),
+                            );
+                            #[cfg(test)]
+                            {
+                                self.control_rects.preview_time = Some(timestamp.rect);
+                            }
+                            #[cfg(not(test))]
+                            let _ = timestamp;
+                        });
+                    });
+            });
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1418,6 +1640,21 @@ impl PlayerApp {
                 self.pending_volume = None;
             }
         }
+        if let Some(player) = &self.player {
+            let track = player
+                .state
+                .tracks
+                .iter()
+                .filter(|track| track.kind == "video")
+                .position(|track| track.selected)
+                .unwrap_or(0);
+            if let Some(media) = self.current.and_then(|index| self.queue.get(index)) {
+                self.frame_preview
+                    .prepare(ctx, &media.source, player.state.duration, track);
+            } else {
+                self.frame_preview.prepare(ctx, "", 0.0, 0);
+            }
+        }
         let now = Instant::now();
         let (active, near_edge) = ctx.input(|i| {
             (
@@ -1451,6 +1688,7 @@ impl PlayerApp {
             self.topbar(ctx);
             self.controls(ctx);
         }
+        self.playlist(ctx);
         self.video(ctx);
         if self.fullscreen && chrome_visible {
             self.fullscreen_controls(ctx);
@@ -1465,7 +1703,6 @@ impl PlayerApp {
             self.error = Some(format!("Video rendering failed: {error}"));
         }
         self.information(ctx);
-        self.playlist(ctx);
 
         #[cfg(target_os = "macos")]
         self.updates.ui(ctx);
@@ -1535,6 +1772,48 @@ impl eframe::App for PlayerApp {
         // Free mpv and our FBO before eframe destroys the current GL context.
         self.renderer.lock().unwrap().take();
     }
+}
+
+#[derive(Clone, Copy)]
+enum PlaylistSort {
+    Name,
+    NameDescending,
+    Path,
+    FileType,
+    Newest,
+    Oldest,
+    Largest,
+    Smallest,
+    Reverse,
+    Shuffle,
+}
+
+fn natural_compare(a: &str, b: &str) -> std::cmp::Ordering {
+    let a = a.to_lowercase();
+    let b = b.to_lowercase();
+    let (mut a, mut b) = (a.as_bytes(), b.as_bytes());
+    while !a.is_empty() && !b.is_empty() {
+        let order;
+        if a[0].is_ascii_digit() && b[0].is_ascii_digit() {
+            let an = a.iter().take_while(|c| c.is_ascii_digit()).count();
+            let bn = b.iter().take_while(|c| c.is_ascii_digit()).count();
+            let av = &a[..an];
+            let bv = &b[..bn];
+            let av = &av[av.iter().take_while(|c| **c == b'0').count()..];
+            let bv = &bv[bv.iter().take_while(|c| **c == b'0').count()..];
+            order = av.len().cmp(&bv.len()).then(av.cmp(bv));
+            a = &a[an..];
+            b = &b[bn..];
+        } else {
+            order = a[0].cmp(&b[0]);
+            a = &a[1..];
+            b = &b[1..];
+        }
+        if !order.is_eq() {
+            return order;
+        }
+    }
+    a.len().cmp(&b.len())
 }
 
 fn folder_videos(folder: &std::path::Path) -> Result<Vec<PathBuf>, String> {
@@ -1628,42 +1907,37 @@ fn format_time(seconds: f64) -> String {
         format!("{:02}:{:02}", seconds / 60, seconds % 60)
     }
 }
-fn bar_style(ui: &mut egui::Ui) {
-    let visuals = ui.visuals_mut();
-    *visuals = egui::Visuals::dark();
+fn chrome_visuals() -> egui::Visuals {
+    let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = BAR_BACKGROUND;
+    visuals.window_fill = BAR_BACKGROUND;
+    visuals.extreme_bg_color = Color32::from_gray(22);
+    visuals.faint_bg_color = Color32::from_gray(35);
+    visuals.hyperlink_color = ACCENT;
     visuals.selection.bg_fill = Color32::from_rgb(78, 53, 27);
     visuals.selection.stroke.color = ACCENT;
     visuals.widgets.inactive.bg_fill = BAR_BACKGROUND;
     visuals.widgets.inactive.weak_bg_fill = BAR_BACKGROUND;
     for widget in [
+        &mut visuals.widgets.noninteractive,
         &mut visuals.widgets.inactive,
         &mut visuals.widgets.hovered,
         &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
     ] {
+        widget.fg_stroke.color = ACCENT;
         widget.corner_radius = egui::CornerRadius::same(2);
     }
+    visuals
+}
+
+fn bar_style(ui: &mut egui::Ui) {
+    *ui.visuals_mut() = chrome_visuals();
 }
 
 fn theme(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
-    style.visuals = egui::Visuals::light();
-    style.visuals.panel_fill = Color32::from_gray(239);
-    style.visuals.window_fill = Color32::from_gray(246);
-    style.visuals.selection.bg_fill = Color32::from_rgb(249, 217, 181);
-    style.visuals.selection.stroke.color = Color32::from_gray(30);
-    style.visuals.widgets.active.bg_fill = ACCENT;
-    style.visuals.widgets.active.fg_stroke.color = Color32::from_gray(25);
-    style.visuals.widgets.inactive.bg_fill = Color32::from_gray(235);
-    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, Color32::from_gray(190));
-    style.visuals.widgets.hovered.bg_fill = Color32::from_gray(249);
-    for widget in [
-        &mut style.visuals.widgets.inactive,
-        &mut style.visuals.widgets.hovered,
-        &mut style.visuals.widgets.active,
-    ] {
-        widget.corner_radius = egui::CornerRadius::same(2);
-    }
+    style.visuals = chrome_visuals();
     style.spacing.item_spacing = egui::vec2(4.0, 3.0);
     style.spacing.button_padding = egui::vec2(5.0, 3.0);
     style.spacing.interact_size = egui::vec2(20.0, 18.0);
@@ -1739,6 +2013,211 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn playlist_sorts_naturally_and_preserves_current_item_with_duplicate_sources() {
+        let ctx = egui::Context::default();
+        let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
+        app.queue = [
+            "Episode 10.mp4",
+            "episode 2.mp4",
+            "Episode 1.mkv",
+            "episode 2.mp4",
+        ]
+        .into_iter()
+        .map(|source| Media::new(source.into()))
+        .collect();
+        app.current = Some(3);
+        app.sort_playlist(PlaylistSort::Name);
+        assert_eq!(
+            app.queue
+                .iter()
+                .map(|media| media.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Episode 1.mkv",
+                "episode 2.mp4",
+                "episode 2.mp4",
+                "Episode 10.mp4"
+            ]
+        );
+        assert_eq!(app.current, Some(2));
+        app.sort_playlist(PlaylistSort::NameDescending);
+        assert_eq!(app.queue.first().unwrap().name, "Episode 10.mp4");
+        assert_eq!(app.current, Some(2));
+        app.sort_playlist(PlaylistSort::Reverse);
+        assert_eq!(app.current, Some(1));
+        for sort in [
+            PlaylistSort::Shuffle,
+            PlaylistSort::FileType,
+            PlaylistSort::Path,
+            PlaylistSort::Newest,
+            PlaylistSort::Oldest,
+            PlaylistSort::Largest,
+            PlaylistSort::Smallest,
+        ] {
+            app.sort_playlist(sort);
+            assert_eq!(app.queue.len(), 4);
+            assert_eq!(app.queue[app.current.unwrap()].source, "episode 2.mp4");
+        }
+        assert!(natural_compare("episode 9", "episode 100000000000000000000000000000").is_lt());
+    }
+
+    #[test]
+    fn keyboard_volume_changes_accumulate_without_waiting_for_engine_events() {
+        let ctx = egui::Context::default();
+        let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
+        app.initial_resize = false;
+        for expected in [95.0, 90.0, 85.0] {
+            draw(
+                &mut app,
+                vec![
+                    egui::Event::Key {
+                        key: Key::ArrowDown,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: Key::ArrowDown,
+                        physical_key: None,
+                        pressed: false,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            assert_eq!(app.pending_volume.unwrap().0, expected);
+        }
+    }
+
+    #[test]
+    fn playlist_manual_move_keeps_the_current_media_selected() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        theme(&ctx);
+        let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
+        app.initial_resize = false;
+        app.show_playlist = true;
+        app.queue = ["first.mp4", "second.mp4"]
+            .into_iter()
+            .map(|source| Media::new(source.into()))
+            .collect();
+        app.current = Some(1);
+        for _ in 0..4 {
+            draw(&mut app, vec![]);
+        }
+        let output = draw(&mut app, vec![]);
+        let down = named_rect(&output, "Move down").center();
+        click(&mut app, down);
+        assert_eq!(app.queue[0].name, "second.mp4");
+        assert_eq!(app.current, Some(0));
+    }
+
+    #[test]
+    fn volume_slider_stays_in_place_across_all_percentage_widths() {
+        let ctx = egui::Context::default();
+        theme(&ctx);
+        let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
+        app.initial_resize = false;
+        let mut baseline = None;
+        for value in [0.0, 1.0, 9.0, 10.0, 99.0, 100.0] {
+            app.set_volume(value);
+            draw(&mut app, vec![]);
+            draw(&mut app, vec![]);
+            let rect = app.control_rects.volume.unwrap();
+            if let Some(baseline) = baseline {
+                assert_eq!(rect, baseline, "volume {value}");
+            }
+            baseline = Some(rect);
+        }
+    }
+
+    #[test]
+    fn sidebar_toggle_reserves_video_space_and_repeat_sits_between_navigation() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        theme(&ctx);
+        let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
+        app.initial_resize = false;
+        app.queue = ["a.mp4", "b.mp4", "c.mp4"]
+            .into_iter()
+            .map(|source| Media::new(source.into()))
+            .collect();
+        app.current = Some(1);
+        let video = |output: &egui::FullOutput| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| {
+                    if let egui::Shape::Callback(callback) = &shape.shape {
+                        Some(callback.rect)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap()
+        };
+        draw(&mut app, vec![]);
+        let output = draw(&mut app, vec![]);
+        let full = video(&output);
+        let previous = named_rect(&output, "Previous");
+        let repeat = named_rect(&output, "Repeat playlist");
+        let next = named_rect(&output, "Next");
+        assert!(previous.right() < repeat.left() && repeat.right() < next.left());
+        assert_eq!(repeat.center().y, previous.center().y);
+        let toggle = named_rect(&output, "Playlist sidebar").center();
+        click(&mut app, toggle);
+        let output = draw(&mut app, vec![]);
+        assert!(app.show_playlist);
+        assert!(video(&output).left() > full.left() + 190.0);
+        assert_eq!(video(&output).right(), full.right());
+        let close = named_rect(&output, "Close playlist sidebar").center();
+        click(&mut app, close);
+        let output = draw(&mut app, vec![]);
+        assert!(!app.show_playlist);
+        assert_eq!(video(&output), full);
+    }
+
+    #[test]
+    fn preview_timestamp_is_stable_from_first_layout_and_stays_above_timeline() {
+        let ctx = egui::Context::default();
+        theme(&ctx);
+        let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
+        let mut baseline_y = None;
+        for pointer in [0.0, 320.0, 640.0, 320.0] {
+            for _ in 0..2 {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(640.0, 400.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        app.timeline_preview(
+                            ctx,
+                            egui::Id::new("preview-position-test"),
+                            pointer,
+                            369.0,
+                            None,
+                            12.345,
+                            0,
+                        )
+                    },
+                );
+                let timestamp = app.control_rects.preview_time.unwrap();
+                assert!(timestamp.left() >= 0.0 && timestamp.right() <= 640.0);
+                assert!(timestamp.bottom() < 369.0);
+                if let Some(y) = baseline_y {
+                    assert_eq!(timestamp.top(), y);
+                }
+                baseline_y = Some(timestamp.top());
+            }
+        }
+    }
+
     fn draw(app: &mut PlayerApp, events: Vec<egui::Event>) -> egui::FullOutput {
         let ctx = app.ctx.clone();
         ctx.run(
@@ -1783,7 +2262,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    #[cfg(not(target_os = "macos"))]
     fn named_rect(output: &egui::FullOutput, label: &str) -> egui::Rect {
         let nodes = &output
             .platform_output
@@ -1793,7 +2271,9 @@ mod tests {
             .nodes;
         let (_, node) = nodes
             .iter()
-            .find(|(_, node)| node.label().is_some_and(|name| name.contains(label)))
+            .find(|(_, node)| {
+                !node.is_disabled() && node.label().is_some_and(|name| name.contains(label))
+            })
             .unwrap_or_else(|| {
                 panic!(
                     "Missing widget {label}: {:?}",
@@ -2022,7 +2502,7 @@ mod tests {
                 assert!(forward.right() < seek.left());
                 assert!(seek.right() < mute.left());
                 assert!(stop.bottom() < play.top());
-                assert!(stop.left() > width - 75.0);
+                assert!(stop.left() > width - 106.0);
                 assert!(stop.right() <= width);
                 assert!(mute.right() < volume.left());
                 assert_eq!(play.height(), 28.0);
