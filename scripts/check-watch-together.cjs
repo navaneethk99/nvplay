@@ -115,6 +115,9 @@ async function waitFor(check, timeout = 30000) {
       }
     }
     if (process.env.NVPLAY_WATCH_LATENCY_CHECK === '1') {
+      // Hidden tabs can retain an old presented video texture while still
+      // decoding. Measure the foreground player a person is actually watching.
+      await pages[0].bringToFront(); await sleep(100);
       const delays = [];
       for (let sample = 0; sample < 10; sample++) {
         delays.push(await pages[0].evaluate(() => {

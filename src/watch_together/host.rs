@@ -209,7 +209,8 @@ async fn peer(
 pub(super) async fn run(
     endpoint: String,
     key: String,
-    ffmpeg: PathBuf,
+    ffmpeg: Option<PathBuf>,
+    media: Option<watch_protocol::Media>,
     mut snapshots: watch::Receiver<Snapshot>,
     mut stopped: oneshot::Receiver<()>,
     emit: Emitter,
@@ -226,11 +227,17 @@ pub(super) async fn run(
         _ = &mut stopped => return Ok(()),
         result = tokio::time::timeout(Duration::from_secs(15), connect) => result.map_err(|_| "The watch service did not respond")?.map_err(|_| "Could not connect to the watch service. Check its address and internet connection.")?,
     };
+    if let Some(media) = media {
+        return super::direct::run(socket, key, media, snapshots, stopped, emit).await;
+    }
+    let ffmpeg = ffmpeg.ok_or("Install FFmpeg to broadcast local files")?;
+    let access = snapshots.borrow().access;
     socket
         .send(WsMessage::Text(
             serde_json::to_string(&Message::Create {
+                media: None,
                 key,
-                access: snapshots.borrow().access,
+                access,
             })
             .unwrap()
             .into(),
@@ -316,6 +323,7 @@ pub(super) async fn run(
     snapshot.bitrate = rate.rate;
     snapshots.borrow_and_update();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
+    let mut last_viewer_at = Instant::now();
     let mut last_state = Instant::now() - Duration::from_secs(1);
     let mut created = false;
     let mut staged_url = None;
@@ -352,7 +360,18 @@ pub(super) async fn run(
                         snapshot.bitrate = rate.rate;
                         emit.send(Event::Status(format!("Streaming at original resolution · {:.1} Mbps upload", rate.rate as f64 / 1_000_000.0)));
                     }
-                    let playing = !snapshot.state.paused && !snapshot.state.buffering && !viewers.is_empty() && ready > 0;
+                    if !viewers.is_empty() { last_viewer_at = Instant::now(); }
+                    if let Some(e) = &mut encoder && let Some(position) = e.align_playback()
+                        && !snapshot.state.paused && (position - snapshot.state.position).abs() > 0.25 {
+                        // A remote source can take seconds to open. Align the host
+                        // once to the first transmitted frame instead of keeping a
+                        // permanent startup offset between the two movie clocks.
+                        e.synchronizing_until = Some(Instant::now() + Duration::from_secs(2));
+                        emit.send(Event::Control(watch_protocol::Control::Seek { position }));
+                    }
+                    let synchronizing = encoder.as_ref().is_some_and(|e| e.synchronizing_until.is_some_and(|until| until > Instant::now()));
+                    let audience = !viewers.is_empty() || (encoder.is_some() && last_viewer_at.elapsed() < Duration::from_secs(30));
+                    let playing = !snapshot.state.paused && (!snapshot.state.buffering || synchronizing) && audience && ready > 0;
                     if let Some(e) = &mut encoder {
                         match e.completed().await {
                             Ok(true) => encoder = None,
@@ -364,13 +383,13 @@ pub(super) async fn run(
                             Err(error) => return Err(error),
                         }
                     }
-                    let drifted = encoder.as_ref().is_some_and(|e| !e.preview && ((e.position + e.started.elapsed().as_secs_f64() * e.speed - snapshot.state.position).abs() > 1.25 || (e.speed - snapshot.state.speed).abs() > 0.001));
+                    let drifted = encoder.as_ref().is_some_and(|e| !e.preview && !synchronizing && ((e.position + e.started.elapsed().as_secs_f64() * e.speed - snapshot.state.position).abs() > 1.25 || (e.speed - snapshot.state.speed).abs() > 0.001));
                     if let Some(e) = &mut encoder && e.bitrate != snapshot.bitrate { e.set_bitrate(snapshot.bitrate); }
                     if drifted || encoder.as_ref().is_some_and(|e| e.width != snapshot.width || e.height != snapshot.height || e.preview == playing) { encoder = None; }
                     if playing {
                         preview_at = None;
                         if encoder.is_none() { encoder = Some(Encoder::start(&ffmpeg, &snapshot, &tracks, hls).await?); }
-                    } else if snapshot.state.paused && !snapshot.state.buffering && snapshot.video && ready > 0
+                    } else if snapshot.state.paused && !snapshot.state.buffering && snapshot.video && ready > 0 && !viewers.is_empty()
                         && preview_at.is_none_or(|(position, count)| (position - snapshot.state.position).abs() > 0.1 || count != viewers.len()) {
                         encoder = None;
                         encoder = Some(Encoder::start(&ffmpeg, &snapshot, &tracks, hls).await?);

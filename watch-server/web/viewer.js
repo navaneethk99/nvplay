@@ -1,4 +1,4 @@
-/* A WebRTC MediaStream is live; the shared movie timeline comes from the host. */
+/* The host owns the timeline; media is provider playback or a live WebRTC stream. */
 'use strict';
 const $ = id => document.getElementById(id);
 const video = $('video');
@@ -12,6 +12,9 @@ let socket, peer, peerId, state, receivedAt = 0, dragging = false, ended = false
 const stream = new MediaStream();
 let access = {play_pause: false, seek: false};
 let controlsReady = false;
+let direct, pingSent = 0, latency = 0;
+function syncDirect() { direct?.sync(state, (performance.now() - receivedAt) / 1000, latency); }
+function autoplayPrompt() { $("overlay").hidden = false; $("overlay-text").textContent = "Click to enable video and sound"; $("join").hidden = false; $("join").textContent = "Enable playback"; }
 let networkWarning = false;
 let videoStalled = false, lastVideoProgress = performance.now(), decodedFrames = 0, qualitySample;
 const accessStatus = () => videoStalled ? 'Waiting for video…' : networkWarning ? 'Connection unstable' : 'Connected';
@@ -71,6 +74,7 @@ function seekTo(position) {
 }
 function syncVolume() {
   video.muted = userMuted || video.volume === 0 || !!state?.paused || !!state?.buffering;
+  direct?.volume(video.volume, video.muted);
   $('mute').setAttribute('aria-label', userMuted || video.volume === 0 ? 'Unmute (M)' : 'Mute (M)');
   $('mute').setAttribute('aria-pressed', String(userMuted || video.volume === 0));
   $('mute').style.opacity = userMuted || video.volume === 0 ? '.5' : '1';
@@ -86,6 +90,7 @@ function enabled(value) {
 }
 function disposePeer() {
   clearTimeout(disconnectTimer);
+  direct?.destroy(); direct = undefined; state = undefined; latency = 0; pingSent = 0;
   if (peer) { peer.onconnectionstatechange = null; peer.onicecandidate = null; peer.close(); }
   peer = null; pendingCandidates = []; qualitySample = undefined; decodedFrames = 0;
   for (const track of stream.getTracks()) { stream.removeTrack(track); track.stop(); }
@@ -96,6 +101,7 @@ function finish(message) {
   $('overlay').hidden = false; $('overlay-text').textContent = message; $('join').hidden = true; status(message);
 }
 async function resumeVideo() {
+  if (direct) { syncDirect(); return; }
   try { await video.play(); if (!ended) $('overlay').hidden = true; }
   catch { if (ended) return; $('overlay').hidden = false; $('overlay-text').textContent = 'Click to enable video and sound'; $('join').hidden = false; $('join').textContent = 'Enable playback'; }
 }
@@ -125,6 +131,14 @@ function connect() {
         case 'joined':
           access = message.access;
           peerId = message.peer;
+          if (message.media) {
+            direct = new BrowserPlayback(message.media, video,
+              () => { enabled(true); keepAwake(); $('overlay').hidden = true; status('Connected · direct playback'); syncDirect(); syncVolume(); },
+              error => { enabled(false); status(error); $('overlay').hidden = false; $('overlay-text').textContent = error; $('overlay-description').hidden = false; $('overlay-description').textContent = 'Ask the host to start a new session with “Stream from my device instead”.'; $('join').hidden = true; },
+              autoplayPrompt);
+            direct.start();
+            break;
+          }
           peer = new RTCPeerConnection({iceServers: message.ice_servers});
           peer.onicecandidate = event => { if (event.candidate) send({type: 'candidate', peer: peerId, candidate: event.candidate.toJSON()}); };
           peer.ontrack = event => {
@@ -165,6 +179,7 @@ function connect() {
           }
           break;
         case 'access': access = message.access; dragging = false; enabled(controlsReady); status(accessStatus()); break;
+        case 'pong': if (pingSent) { latency = Math.min((performance.now() - pingSent) / 2000, .5); pingSent = 0; } break;
         case 'denied': status(message.message); break;
         case 'state':
           state = message.state; receivedAt = performance.now(); enabled(controlsReady);
@@ -178,6 +193,7 @@ function connect() {
           syncVolume();
           resumeVideo();
           if (state.buffering) status('The host is buffering…');
+          else if (direct?.ready && !direct.failed) status('Connected · direct playback');
           else if (peer?.connectionState === 'connected') status(accessStatus());
           break;
         case 'ended': finish('The host ended this watch party.'); break;
@@ -194,10 +210,11 @@ function connect() {
 }
 $('join').onclick = () => {
   if (!socket) {
-    if (!token || !room || !window.RTCPeerConnection) { finish('Open a complete viewing link in a browser that supports WebRTC.'); return; }
+    if (!token || !room) { finish('Open a complete viewing link in a supported browser.'); return; }
     // Unlock media playback during this user gesture, including on mobile Safari.
     video.play().catch(() => {}); $('overlay').hidden = true; connect();
-  } else { video.play().then(() => { $('overlay').hidden = true; }).catch(() => status('Your browser could not start playback.')); }
+  } else if (direct) { $('overlay').hidden = true; direct.resume(); syncDirect(); }
+  else { video.play().then(() => { $('overlay').hidden = true; }).catch(() => status('Your browser could not start playback.')); }
 };
 $('play').onclick = playback;
 $('back').onclick = () => seekTo((state?.position || 0) - 10);
@@ -237,6 +254,7 @@ document.addEventListener('keydown', event => {
   showControls();
 });
 setInterval(() => {
+  syncDirect();
   if (!state || dragging) return;
   // Cap interpolation during a lost connection; never advance an unconfirmed timeline indefinitely.
   const elapsed = !state.paused && !state.buffering ? Math.min((performance.now() - receivedAt) / 1000, 1) * state.speed : 0;
@@ -292,3 +310,7 @@ window.addEventListener('pagehide', () => {
   if (socket) { socket.onclose = null; socket.close(); } disposePeer();
 });
 window.addEventListener('pageshow', () => { if (suspended) { suspended = false; if (socket && !ended) connect(); } });
+
+setInterval(() => {
+  if (socket?.readyState === WebSocket.OPEN && !pingSent) { pingSent = performance.now(); send({type: 'ping'}); }
+}, 5000);

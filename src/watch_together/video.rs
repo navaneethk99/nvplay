@@ -1,7 +1,11 @@
 //! Keep source decoding alive while the H.264 bitrate changes. YUV4MPEG2 carries
 //! original dimensions/frame rate; a restarted encoder gets a fresh header and
 //! the next complete raw frame, without reopening or seeking the movie source.
-use std::{path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout},
@@ -23,7 +27,7 @@ impl Drop for Process {
 }
 impl Process {
     async fn start(
-        path: &PathBuf,
+        path: &Path,
         hardware: bool,
         rate: u64,
         port: u16,

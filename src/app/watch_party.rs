@@ -14,6 +14,7 @@ pub(super) struct WatchParty {
     status: String,
     generation: u64,
     source: String,
+    broadcast: bool,
 }
 impl Default for WatchParty {
     fn default() -> Self {
@@ -41,6 +42,7 @@ impl Default for WatchParty {
             status: "Creating your viewing link…".into(),
             generation: 0,
             source: String::new(),
+            broadcast: false,
         }
     }
 }
@@ -109,13 +111,23 @@ impl PlayerApp {
         if !snapshot.state.valid() {
             return Err("Wait for playback information to finish loading.".into());
         }
-        let ffmpeg = crate::streaming::find_tool("NVPLAY_FFMPEG", "ffmpeg").ok_or(
-            "Install FFmpeg with libx264 and libopus to share video, then restart nvplay.",
-        )?;
+        let media = if self.watch_party.broadcast {
+            None
+        } else {
+            player.sharing_browser_media()?
+        };
+        let ffmpeg = if media.is_none() {
+            let tool = crate::streaming::find_tool("NVPLAY_FFMPEG", "ffmpeg")
+                .ok_or("Install FFmpeg with libx264/libopus, then restart nvplay.")?;
+            Some(tool)
+        } else {
+            None
+        };
         self.watch_party.host = Some(Host::start(
             &self.watch_party.endpoint,
             self.watch_party.key.clone(),
             ffmpeg,
+            media,
             snapshot,
             ctx.clone(),
         )?);
@@ -191,12 +203,12 @@ impl PlayerApp {
             ui.separator();
         }
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.label("Share at the playing video's original resolution.");
+            ui.label("Supported internet videos play directly on each viewer’s device.");
             if let Some(p) = &self.player
                 && p.state.video_width > 0 && p.state.video_height > 0 {
-                ui.label(format!("{} × {} · Original resolution", p.state.video_width, p.state.video_height));
+                ui.label(format!("{} × {} · Host video", p.state.video_width, p.state.video_height));
             }
-            ui.small("Higher resolutions need more upload bandwidth. Keep nvplay open while sharing.");
+            ui.small("Playback and seeking stay in sync. Local files are streamed from your device. Keep nvplay open while sharing.");
             ui.separator();
             ui.strong("Viewer access");
             ui.checkbox(&mut self.watch_party.access.play_pause, "Allow play and pause");
@@ -219,7 +231,7 @@ impl PlayerApp {
                         if ui.button("Copy viewing link").clicked() {
                             ctx.copy_text(self.watch_party.url.clone());
                         }
-                        if self.watch_party.status.starts_with("Streaming") { ui.small(&self.watch_party.status); }
+                        ui.small(&self.watch_party.status);
                         ui.label(format!(
                             "{} of {} viewers joined",
                             self.watch_party.viewers,
@@ -229,6 +241,8 @@ impl PlayerApp {
 
                 } else {
                     ui.label("Watch your current video with up to six friends.");
+                    ui.checkbox(&mut self.watch_party.broadcast, "Stream from my device instead")
+                        .on_hover_text("Use this if a provider blocks direct browser playback. Requires more upload bandwidth and FFmpeg.");
 
                     if self.watch_party.endpoint.is_empty() {
                         ui.label("Configure your public watch service to create viewing links.");
@@ -293,6 +307,7 @@ mod tests {
         app.watch_party.endpoint = std::env::var("NVPLAY_WATCH_TEST_URL")
             .unwrap_or_else(|_| "http://localhost:8787".into());
         app.watch_party.key = std::env::var("NVPLAY_WATCH_TEST_HOST_KEY").unwrap_or_default();
+        app.watch_party.broadcast = true;
         let started = Instant::now();
         let mut began = false;
         let mut positioned = false;

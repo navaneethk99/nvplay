@@ -30,6 +30,7 @@ struct Viewer {
     media: Option<relay::Connection>,
 }
 struct Room {
+    media: Option<watch_protocol::Media>,
     token: String,
     relay: Option<relay::Relay>,
     uplink_feedback: bool,
@@ -129,7 +130,11 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
     };
     let (tx, mut rx) = mpsc::channel::<Message>(64);
     let (room_id, peer_id) = match first {
-        Message::Create { key, access } => {
+        Message::Create { key, access, media } => {
+            if media.as_ref().is_some_and(|m| !m.valid()) {
+                reject(&mut socket, "Unsupported browser media source").await;
+                return;
+            }
             if !equal_secret(&key, &service.key) {
                 reject(&mut socket, "Host authentication failed").await;
                 return;
@@ -155,6 +160,7 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
             rooms.insert(
                 room_id.clone(),
                 Room {
+                    media,
                     token,
                     relay: None,
                     uplink_feedback: false,
@@ -210,6 +216,7 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
             }
             let client_offers = client_offers && session.relay.is_some();
             let _ = tx.try_send(Message::Joined {
+                media: session.media.clone(),
                 peer: peer.clone(),
                 client_offers,
                 ice_servers: service.ice_servers(),
@@ -289,7 +296,7 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
                         for viewer in room.viewers.values() { let _ = viewer.tx.try_send(Message::State { state: state.clone() }); }
                     }
                     (None, Message::Uplink { bitrate: 0, queue_ms: 0 }) if room.relay.is_none() => { room.uplink_feedback = true; }
-                    (None, Message::Offer { peer, sdp }) if peer == "__publisher" && room.relay.is_none() => {
+                    (None, Message::Offer { peer, sdp }) if peer == "__publisher" && room.relay.is_none() && room.media.is_none() => {
                         match relay::Relay::publish(sdp, room.host.clone(), room.uplink_feedback).await {
                             Ok(relay) => {
                                 for (id, viewer) in &mut room.viewers {
@@ -411,15 +418,17 @@ fn app(service: Arc<Service>) -> Router {
         .route("/admin/activity", get(activity))
         .route("/admin/idle", post(claim_idle))
         .route("/watch/{room}", get(|| async { Html(include_str!("../web/index.html")) }))
+        .route("/direct.js", get(|| async { ([("content-type", "text/javascript; charset=utf-8")], include_str!("../web/direct.js")) }))
+        .route("/hls.js", get(|| async { ([("content-type", "text/javascript; charset=utf-8")], include_str!("../web/vendor/hls-1.6.16.min.js")) }))
         .route("/viewer.js", get(|| async { ([("content-type", "text/javascript; charset=utf-8")], include_str!("../web/viewer.js")) }))
         .route("/ws", get(socket))
         .layer(axum::middleware::from_fn(|request: axum::extract::Request, next: axum::middleware::Next| async move {
             let mut response = next.run(request).await;
             for (key, value) in [
-                ("referrer-policy", "no-referrer"),
+                ("referrer-policy", "strict-origin-when-cross-origin"),
                 ("cache-control", "no-store"),
                 ("x-content-type-options", "nosniff"),
-                ("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'"),
+                ("content-security-policy", "default-src 'self'; script-src 'self' https://www.youtube.com https://s.ytimg.com; style-src 'unsafe-inline'; connect-src 'self' https: http:; media-src 'self' blob: https: http:; frame-src https://www.youtube.com; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'"),
             ] { response.headers_mut().insert(axum::http::HeaderName::from_static(key), value.parse().unwrap()); }
             response
         }))
@@ -523,6 +532,7 @@ mod tests {
         service.rooms.lock().await.insert(
             "room".into(),
             Room {
+                media: None,
                 token: secret(),
                 relay: None,
                 uplink_feedback: false,
@@ -645,6 +655,7 @@ mod tests {
         send(
             &mut wrong,
             Message::Create {
+                media: None,
                 key: "wrong".into(),
                 access: Access::default(),
             },
@@ -655,6 +666,7 @@ mod tests {
         send(
             &mut host,
             Message::Create {
+                media: None,
                 key: "host-secret".into(),
                 access: Access::default(),
             },

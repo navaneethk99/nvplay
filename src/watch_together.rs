@@ -1,10 +1,56 @@
 mod azure;
+mod direct;
 mod host;
 mod media;
 mod video;
 
 use std::{path::PathBuf, sync::mpsc};
 use watch_protocol::{Control, Playback};
+
+/// Use the provider's player for YouTube, and a native player for media URLs.
+/// Other website extractors retain the existing broadcast path.
+pub fn browser_media(source: &str) -> Option<watch_protocol::Media> {
+    use watch_protocol::Media;
+    let url = url::Url::parse(source).ok()?;
+    let host = url.host_str()?;
+    let youtube = matches!(
+        host,
+        "youtube.com"
+            | "www.youtube.com"
+            | "m.youtube.com"
+            | "youtube-nocookie.com"
+            | "www.youtube-nocookie.com"
+            | "youtu.be"
+            | "www.youtu.be"
+    );
+    let media = if youtube {
+        let id = if host.ends_with("youtu.be") {
+            url.path_segments()?.next()?.to_owned()
+        } else if url.path() == "/watch" {
+            url.query_pairs().find(|(k, _)| k == "v")?.1.into_owned()
+        } else {
+            let mut parts = url.path_segments()?;
+            if !matches!(parts.next()?, "shorts" | "embed" | "live") {
+                return None;
+            }
+            parts.next()?.to_owned()
+        };
+        Media::Youtube { id }
+    } else if matches!(
+        url.path()
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+        "mp4" | "m4v" | "webm" | "m3u8" | "mp3" | "m4a" | "aac" | "flac" | "ogg" | "opus" | "wav"
+    ) {
+        Media::Url { url: source.into() }
+    } else {
+        return None;
+    };
+    media.valid().then_some(media)
+}
 
 #[derive(Clone)]
 pub struct Snapshot {
@@ -44,7 +90,8 @@ impl Host {
     pub fn start(
         endpoint: &str,
         key: String,
-        ffmpeg: PathBuf,
+        ffmpeg: Option<PathBuf>,
+        media: Option<watch_protocol::Media>,
         snapshot: Snapshot,
         ctx: eframe::egui::Context,
     ) -> Result<Self, String> {
@@ -69,6 +116,7 @@ impl Host {
                             endpoint,
                             key,
                             ffmpeg,
+                            media,
                             receiver,
                             stopped,
                             emit.clone(),
@@ -139,6 +187,37 @@ pub fn signaling_url(endpoint: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn browser_sources_use_provider_ids_and_supported_media_only() {
+        use watch_protocol::Media;
+        for source in [
+            "https://youtu.be/dQw4w9WgXcQ?t=10",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://m.youtube.com/shorts/dQw4w9WgXcQ",
+        ] {
+            assert_eq!(
+                browser_media(source),
+                Some(Media::Youtube {
+                    id: "dQw4w9WgXcQ".into()
+                })
+            );
+        }
+        assert!(matches!(
+            browser_media("https://cdn.example/movie.M3U8?token=x"),
+            Some(Media::Url { .. })
+        ));
+        for source in [
+            "/tmp/movie.mp4",
+            "file:///tmp/movie.mp4",
+            "https://youtube.com.evil/watch?v=dQw4w9WgXcQ",
+            "https://youtube.com/watch?v=bad",
+            "https://example.com/video.mkv",
+            "https://example.com/video.mpd",
+            "https://user:secret@example.com/movie.mp4",
+        ] {
+            assert_eq!(browser_media(source), None, "{source}");
+        }
+    }
     #[test]
     fn public_signaling_requires_tls_and_does_not_accept_embedded_secrets() {
         assert_eq!(

@@ -72,7 +72,7 @@ expired signed URL can still fail to share even if libmpv can play it.
 The desktop remains authoritative. Browsers send play/pause/absolute seek intents;
 the desktop applies them through the existing playback layer and broadcasts
 observed state. The browser uses the shared movie timeline rather than the live
-MediaStream timeline. Playback changes and drift restart the encoder at the
+MediaStream timeline. Playback changes and drift reopen decoding at the
 host's current position, with continuous RTP sequence numbers/timestamps so
 seeking does not reset the WebRTC connection. Encoding, networking, and browser
 buffers introduce delay; this does not promise frame-perfect synchronization.
@@ -184,3 +184,11 @@ negotiated before publishing so older desktop builds remain compatible. Viewers
 that support browser-initiated offers use that handshake; older viewers keep the
 server-offered path. The desktop exposes the invite once its publisher SDP is
 accepted, so a copied link cannot race ahead of the forwarding session.
+
+Video decoding and H.264 encoding use separate FFmpeg processes connected through
+a bounded YUV4MPEG2 frame pipe. Bitrate changes restart only H.264 encoding and
+send a new keyframe; the decoder, network source, and audio stream stay open.
+The publisher aligns the host to the first transmitted frame after startup or a
+seek, avoiding a permanent offset caused by source-opening time. This can move
+the host's timeline back slightly during initial synchronization. A 30-second
+audience grace period keeps decoding alive across brief mobile reconnections.

@@ -292,6 +292,20 @@ impl Player {
             .to_owned())
     }
 
+    pub fn sharing_browser_media(&self) -> Result<Option<watch_protocol::Media>, String> {
+        if let Some(playlist) = &self.cinejoy_playlist {
+            let playlist = std::fs::read_to_string(playlist.path())
+                .map_err(|_| "Could not read the movie playlist")?;
+            let media = watch_protocol::Media::HlsPlaylist { playlist };
+            return if media.valid() {
+                Ok(Some(media))
+            } else {
+                Err("The movie playlist cannot be shared with browsers".into())
+            };
+        }
+        Ok(crate::watch_together::browser_media(&self.source))
+    }
+
     /// Commands are asynchronous so slow network input cannot block the UI or
     /// deadlock against mpv's render thread. Completion errors arrive via poll.
     pub fn command(&mut self, arguments: &[&str]) -> Result<(), String> {

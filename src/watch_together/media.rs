@@ -3,8 +3,8 @@ use super::Snapshot;
 use std::{
     path::Path,
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering},
+        Arc, OnceLock,
+        atomic::{AtomicU8, AtomicU16, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -110,7 +110,7 @@ pub struct Encoder {
     diagnostics: Option<JoinHandle<Vec<u8>>>,
     tasks: Vec<JoinHandle<()>>,
     pub preview: bool,
-    preview_sent: Option<Arc<AtomicBool>>,
+    preview_sent: Option<Arc<OnceLock<Instant>>>,
     drain_since: Option<Instant>,
     pub position: f64,
     pub speed: f64,
@@ -118,6 +118,8 @@ pub struct Encoder {
     pub height: i64,
     pub bitrate: u64,
     pub started: Instant,
+    aligned: bool,
+    pub synchronizing_until: Option<Instant>,
 }
 impl Drop for Encoder {
     fn drop(&mut self) {
@@ -134,6 +136,15 @@ impl Drop for Encoder {
     }
 }
 impl Encoder {
+    pub fn align_playback(&mut self) -> Option<f64> {
+        if self.preview || self.aligned {
+            return None;
+        }
+        let first = *self.preview_sent.as_ref()?.get()?;
+        self.aligned = true;
+        self.started = first;
+        Some(self.position + first.elapsed().as_secs_f64() * self.speed)
+    }
     pub fn set_bitrate(&mut self, bitrate: u64) {
         self.bitrate = bitrate;
         self.rate.send_replace(bitrate);
@@ -160,7 +171,7 @@ impl Encoder {
                     && self
                         .preview_sent
                         .as_ref()
-                        .is_some_and(|sent| !sent.load(Ordering::Acquire))
+                        .is_some_and(|sent| sent.get().is_none())
                 {
                     let since = self.drain_since.get_or_insert_with(Instant::now);
                     if since.elapsed() < Duration::from_secs(2) {
@@ -269,9 +280,13 @@ impl Encoder {
             if snapshot.state.paused {
                 command.args(["-frames:v", "1"]);
             }
+            // An HLS master can list its smallest rendition first. Let FFmpeg
+            // choose the highest-resolution video before matching desktop size,
+            // rather than enlarging the lowest rendition to an HD frame.
+            if !is_hls(&snapshot.source) {
+                command.args(["-map", "0:v:0"]);
+            }
             command.args([
-                "-map",
-                "0:v:0",
                 "-an",
                 "-vf",
                 &filter,
@@ -358,7 +373,7 @@ impl Encoder {
             }
             tail
         });
-        let preview_sent = (snapshot.video).then(|| Arc::new(AtomicBool::new(false)));
+        let preview_sent = (snapshot.video).then(|| Arc::new(OnceLock::new()));
         let mut tasks = vec![];
         if snapshot.video {
             tasks.extend(pump(
@@ -399,6 +414,8 @@ impl Encoder {
             height: snapshot.height,
             bitrate,
             started: Instant::now(),
+            aligned: false,
+            synchronizing_until: None,
         })
     }
 }
@@ -614,7 +631,7 @@ fn pump(
     epoch: Instant,
     rate: u32,
     bitrate: Option<tokio::sync::watch::Receiver<u64>>,
-    preview_sent: Option<Arc<AtomicBool>>,
+    preview_sent: Option<Arc<OnceLock<Instant>>>,
     send_time_extension: Option<Arc<AtomicU8>>,
 ) -> Vec<JoinHandle<()>> {
     // Receiving must never wait for network pacing or a slow peer. A bounded
@@ -685,7 +702,7 @@ fn pump(
                 && packet.header.marker
                 && let Some(done) = &preview_sent
             {
-                done.store(true, Ordering::Release);
+                done.get_or_init(Instant::now);
             }
         }
     });
@@ -695,6 +712,86 @@ fn pump(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    #[ignore = "requires FFmpeg; verifies bitrate changes continue after the original source is removed"]
+    async fn bitrate_changes_do_not_reopen_the_source() {
+        let fixture = crate::subtitles::library::tests::Fixture::new();
+        let file = fixture.0.join("persistent-source.mp4");
+        let ffmpeg = crate::streaming::find_tool("NVPLAY_FFMPEG", "ffmpeg").unwrap();
+        assert!(
+            std::process::Command::new(&ffmpeg)
+                .args([
+                    "-nostdin",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=320x180:rate=25",
+                    "-t",
+                    "12",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast"
+                ])
+                .arg(&file)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let snapshot = Snapshot {
+            source: file.to_string_lossy().into_owned(),
+            audio_source: None,
+            video_headers: String::new(),
+            audio_headers: String::new(),
+            video: true,
+            audio: false,
+            width: 320,
+            height: 180,
+            bitrate: 2_000_000,
+            access: Default::default(),
+            state: watch_protocol::Playback {
+                position: 0.0,
+                duration: 12.0,
+                paused: false,
+                buffering: false,
+                speed: 1.0,
+                title: "Continuous decoding".into(),
+            },
+        };
+        let tracks = Tracks::new();
+        let mut encoder = Encoder::start(&ffmpeg, &snapshot, &tracks, HlsOptions::default())
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while encoder.preview_sent.as_ref().unwrap().get().is_none() {
+            assert!(Instant::now() < deadline, "missing initial frame");
+            assert!(!encoder.completed().await.unwrap());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        std::fs::remove_file(&file).unwrap();
+        for bitrate in [500_000, 1_500_000, 750_000] {
+            let before = tracks.video_sequence.load(Ordering::Relaxed);
+            encoder.set_bitrate(bitrate);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while tracks
+                .video_sequence
+                .load(Ordering::Relaxed)
+                .wrapping_sub(before)
+                < 20
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "bitrate change stalled the stream"
+                );
+                assert!(!encoder.completed().await.unwrap());
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires FFmpeg; checks first-frame delivery after a deep seek in a long GOP"]
     async fn seeking_paces_decoded_frames_instead_of_preroll() {
@@ -754,12 +851,7 @@ mod tests {
         let mut encoder = Encoder::start(&ffmpeg, &snapshot, &Tracks::new(), HlsOptions::default())
             .await
             .unwrap();
-        while !encoder
-            .preview_sent
-            .as_ref()
-            .unwrap()
-            .load(Ordering::Acquire)
-        {
+        while encoder.preview_sent.as_ref().unwrap().get().is_none() {
             assert!(
                 started.elapsed() < Duration::from_secs(2),
                 "deep seeking delayed the first frame"

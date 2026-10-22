@@ -103,19 +103,30 @@ The app discovers tools beside the executable, in a macOS bundle's `Contents/Res
 
 ### Watch together over the internet
 
-The toolbar's **Watch together** button creates a browser viewing link for up to
-six friends. Everyone with the link can play, pause, and seek; the desktop owns
-the shared timeline. Video/audio travel over WebRTC, with TURN relay fallback.
-Copy the link from the dialog, and use **End watch party** to revoke it.
+Open the **Watch together** sidebar to create a browser viewing link for up to
+six friends. The desktop owns the shared timeline and controls who can play,
+pause, seek, or join. **End session** revokes the link.
+
+YouTube videos use the provider's embedded player on each viewer's device.
+Supported media URLs (including MP4/WebM and HLS) and Cinejoy's resolved HLS
+playlist also play directly in the browser. Only playback state and control
+requests pass through the watch service; these sessions do not need host-side
+FFmpeg, video encoding, or a WebRTC media uplink. Viewers follow the host's
+position, pause, buffering, and speed, with periodic drift correction.
+
+Local files, other website extractors, and formats needing transcoding use the
+existing FFmpeg/WebRTC broadcast path. Choose **Stream from my device instead**
+before creating a session if a provider blocks direct browser playback. Direct
+playback depends on browser codec support and provider access: CORS restrictions,
+embedding restrictions, login, region checks, and expiring or IP-bound URLs may
+prevent playback. External subtitles and alternate track selections are not
+mirrored to direct viewers.
 
 A public watch service must be deployed and configured before public links can
-be created. The repository includes the signaling service, browser viewer,
-HTTPS/TURN Docker deployment, and setup instructions in
-[deploy/watch/README.md](deploy/watch/README.md). FFmpeg with libx264/libopus is
-required on the host desktop. No public hosting is provisioned automatically.
-The first version supports seekable media, encodes at up to 1280 px wide/30 fps,
-and uses one host upload stream per viewer. It does not mirror external subtitles
-or selected alternate tracks. Playback includes network/encoding delay.
+be created. Rebuild both the desktop app and watch server for direct playback.
+See [deployment instructions](deploy/watch/README.md) and the
+[architecture and test guide](docs/watch-together.md). No public hosting is
+provisioned automatically. Keep nvplay open while sharing.
 
 ### Download subtitles
 
