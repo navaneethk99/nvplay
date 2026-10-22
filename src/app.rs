@@ -1,4 +1,5 @@
 mod audio;
+mod history_artwork;
 mod history_panel;
 mod icons;
 mod movie_search;
@@ -10,6 +11,7 @@ mod subtitle_controls;
 mod subtitle_search;
 #[cfg(target_os = "macos")]
 mod updates;
+mod watch_party;
 
 use crate::{
     playback::{PlaybackEvent, Player, VideoRenderer},
@@ -83,6 +85,7 @@ pub struct PlayerApp {
     movie_search: movie_search::MovieSearch,
     subtitle_search: subtitle_search::SubtitleSearch,
     playback_generation: u64,
+    watch_party: watch_party::WatchParty,
     downloaded_subtitles: Vec<crate::subtitles::Downloaded>,
     subtitle_preferences: subtitle_controls::Preferences,
     sidebar_tab: SidebarTab,
@@ -174,6 +177,7 @@ impl PlayerApp {
             movie_search: movie_search::MovieSearch::default(),
             subtitle_search: subtitle_search::SubtitleSearch::default(),
             playback_generation: 0,
+            watch_party: watch_party::WatchParty::default(),
             downloaded_subtitles: Vec::new(),
             subtitle_preferences: subtitle_controls::Preferences::default(),
             sidebar_tab: SidebarTab::Playlist,
@@ -246,6 +250,7 @@ impl PlayerApp {
                     {
                         let _ = player.command(&["set", "force-media-title", &media.name]);
                     }
+                    self.watch_party.end();
                     self.playback_generation = self.playback_generation.wrapping_add(1);
                     self.subtitle_search.close();
                     self.subtitle_preferences.cancel_pending();
@@ -429,6 +434,7 @@ impl PlayerApp {
         }
         if ctx.wants_keyboard_input()
             || self.show_url
+            || self.watch_party.open
             || self.show_help
             || self.movie_search.open
             || self.subtitle_search.open
@@ -478,6 +484,7 @@ impl PlayerApp {
     }
 
     fn stop(&mut self) {
+        self.watch_party.end();
         self.checkpoint_history();
         self.watch_history.flush();
         self.watch_history.cancel_session();
@@ -927,6 +934,13 @@ impl PlayerApp {
                 .clicked()
             {
                 self.next();
+            }
+            if ui
+                .selectable_label(self.watch_party.active(), "Watch together")
+                .on_hover_text("Create a viewing link for friends")
+                .clicked()
+            {
+                self.watch_party.open = true;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icons::button(ui, Icon::Fullscreen, "Fullscreen (F)", self.fullscreen).clicked()
@@ -1704,6 +1718,7 @@ impl PlayerApp {
         for event in events {
             self.handle_playback_event(event);
         }
+        self.poll_watch_party();
         self.poll_mute(ctx);
         self.subtitle_preferences.poll(ctx);
         self.poll_history();
@@ -1792,6 +1807,7 @@ impl PlayerApp {
         });
         let pinned = egui::Popup::is_any_open(ctx)
             || self.show_url
+            || self.watch_party.open
             || self.movie_search.open
             || self.subtitle_search.open
             || self.show_help
@@ -1831,6 +1847,7 @@ impl PlayerApp {
 
         #[cfg(target_os = "macos")]
         self.updates.ui(ctx);
+        self.watch_party_dialog(ctx);
         self.network_dialog(ctx);
         self.movie_search_dialog(ctx);
         self.subtitle_search_dialog(ctx);
@@ -1895,6 +1912,7 @@ impl eframe::App for PlayerApp {
         self.ui(ctx);
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.watch_party.end();
         self.checkpoint_history();
         self.watch_history.flush();
         self.subtitle_preferences.flush();

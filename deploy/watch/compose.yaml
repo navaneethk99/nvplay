@@ -1,0 +1,60 @@
+# Run on a Linux VPS with a public IP. See README.md in this directory.
+services:
+  signaling:
+    build:
+      context: ../..
+      dockerfile: deploy/watch/Dockerfile
+    restart: unless-stopped
+    environment:
+      NVPLAY_WATCH_PUBLIC_URL: https://${WATCH_DOMAIN:?Set WATCH_DOMAIN}
+      NVPLAY_WATCH_HOST_KEY: ${WATCH_HOST_KEY:?Set WATCH_HOST_KEY}
+      NVPLAY_TURN_SECRET: ${TURN_SECRET:?Set TURN_SECRET}
+      NVPLAY_TURN_URLS: turn:${TURN_DOMAIN:?Set TURN_DOMAIN}:3478?transport=udp,turn:${TURN_DOMAIN}:3478?transport=tcp
+    expose: ["8787"]
+    security_opt: ["no-new-privileges:true"]
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      WATCH_DOMAIN: ${WATCH_DOMAIN}
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [signaling]
+  turn:
+    image: coturn/coturn:4.6.3
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --fingerprint
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET}
+      - --realm=${TURN_DOMAIN}
+      - --external-ip=${TURN_PUBLIC_IP:?Set TURN_PUBLIC_IP}
+      - --listening-ip=${TURN_LISTEN_IP:-0.0.0.0}
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49259
+      - --user-quota=12
+      - --total-quota=1200
+      - --max-bps=4000000
+      - --no-multicast-peers
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=100.64.0.0-100.127.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=::1
+      - --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --log-file=stdout
+volumes:
+  caddy_data:
+  caddy_config:

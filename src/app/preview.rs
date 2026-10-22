@@ -305,6 +305,20 @@ fn extract(ffmpeg: &Path, request: &Request) -> Option<Vec<u8>> {
     extract_cancellable(ffmpeg, request, || false)
 }
 
+/// Decode the first video frame independently of the timeline and player.
+pub(super) fn first_frame(ffmpeg: &Path, source: &str) -> Option<egui::ColorImage> {
+    let pixels = extract_cancellable(
+        ffmpeg,
+        &Request {
+            source: source.into(),
+            millis: 0,
+            track: 0,
+        },
+        || false,
+    )?;
+    Some(egui::ColorImage::from_rgba_unmultiplied(SIZE, &pixels))
+}
+
 fn extract_cancellable(
     ffmpeg: &Path,
     request: &Request,

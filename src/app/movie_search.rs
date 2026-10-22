@@ -243,6 +243,9 @@ impl super::PlayerApp {
     }
     fn play_searched_movie(&mut self, movie: Movie) {
         let source = movie.source();
+        if let Some(url) = movie.poster_url() {
+            self.watch_history.movie_posters.insert(source.clone(), url);
+        }
         let index = self
             .queue
             .iter()

@@ -7,6 +7,7 @@ mod settings;
 mod source_version;
 mod streaming;
 mod subtitles;
+mod watch_together;
 
 fn main() -> eframe::Result {
     let media = std::env::args_os().skip(1).collect();

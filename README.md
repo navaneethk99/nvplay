@@ -101,6 +101,22 @@ The app discovers tools beside the executable, in a macOS bundle's `Contents/Res
 
 **Netflix does not play here.** Its streams require account authentication and DRM through a [Netflix-supported browser or app](https://help.netflix.com/en/node/30081). Netflix links show an explicit explanation in the URL dialog. Other DRM services are also unsupported. Private, age-restricted, region-locked, or expired videos may fail; the app does not read your browser cookies or sign in to websites. Errors include recent engine/extractor diagnostics, and Stop cancels a pending stream. Website support depends on the current extractor and service, so arbitrary URLs cannot be guaranteed. A JavaScript-only watch page may have no extractable video in its HTML and needs a site-specific extractor. Unsupported pages report **Website not supported** with the extractor reason; follow-on errors about the internal `ytdl://` URL are suppressed.
 
+### Watch together over the internet
+
+The toolbar's **Watch together** button creates a browser viewing link for up to
+six friends. Everyone with the link can play, pause, and seek; the desktop owns
+the shared timeline. Video/audio travel over WebRTC, with TURN relay fallback.
+Copy the link from the dialog, and use **End watch party** to revoke it.
+
+A public watch service must be deployed and configured before public links can
+be created. The repository includes the signaling service, browser viewer,
+HTTPS/TURN Docker deployment, and setup instructions in
+[deploy/watch/README.md](deploy/watch/README.md). FFmpeg with libx264/libopus is
+required on the host desktop. No public hosting is provisioned automatically.
+The first version supports seekable media, encodes at up to 1280 px wide/30 fps,
+and uses one host upload stream per viewer. It does not mirror external subtitles
+or selected alternate tracks. Playback includes network/encoding delay.
+
 ### Download subtitles
 
 Choose **Subtitle → Download Subtitle…**, enter the movie title and a language
@@ -208,7 +224,13 @@ HTTP media URL and needs no OpenSubtitles connection.
 
 Open the sidebar with **Ctrl/Cmd+L** and select **History**, or choose
 **View → History**. The last 100 watched videos appear with their saved playback
-time, most recent first. Click a movie to reopen it and resume from that time.
+time, most recent first within **Movies** and **Videos** subsections. Movies
+opened through the catalog or a Cinejoy movie link show their movie poster;
+other files and streams show a thumbnail of their first frame. Thumbnail
+decoding uses FFmpeg, runs in the background, and leaves a placeholder when
+artwork is unavailable. Movie poster references are saved with history, and
+older movie entries fetch their posters when displayed. Click an item to
+reopen it and resume from that time.
 Finished movies show **Watched · Play again** and restart from the beginning.
 Opening a file through the regular file picker or playlist starts it normally;
 the History entry provides the resume action.
@@ -287,9 +309,9 @@ Useful next milestones: persistent settings and recent files, frame stepping and
 ## Validate
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
 ```
 
 An explicit integration test exercises the real engine without a display or sound device. With FFmpeg installed:

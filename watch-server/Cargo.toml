@@ -1,0 +1,21 @@
+[package]
+name = "nvplay-watch-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+watch-protocol = { path = "../watch-protocol" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "signal"] }
+futures-util = { version = "0.3", features = ["sink"] }
+serde_json = "1"
+rand = "0.9"
+base64 = "0.22"
+hmac = "0.12"
+sha1 = "0.10"
+url = "2.5"
+
+[dev-dependencies]
+tokio-tungstenite = "0.28"

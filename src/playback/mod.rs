@@ -279,6 +279,19 @@ impl Player {
         })
     }
 
+    /// The broadcasting worker opens this independently; never expose it to viewers.
+    pub fn sharing_source(&self) -> Result<String, String> {
+        if self.state.idle || self.cinejoy_resolver.is_some() {
+            return Err("Wait for a video to finish loading before sharing.".into());
+        }
+        Ok(self
+            .cinejoy_playlist
+            .as_ref()
+            .map(|p| p.path())
+            .unwrap_or(&self.source)
+            .to_owned())
+    }
+
     /// Commands are asynchronous so slow network input cannot block the UI or
     /// deadlock against mpv's render thread. Completion errors arrive via poll.
     pub fn command(&mut self, arguments: &[&str]) -> Result<(), String> {

@@ -16,6 +16,7 @@ pub struct Entry {
     pub duration: f64,
     pub watched_at: u64,
     pub completed: bool,
+    pub poster_url: Option<String>,
 }
 impl Default for Entry {
     fn default() -> Self {
@@ -26,9 +27,16 @@ impl Default for Entry {
             duration: 0.0,
             watched_at: 0,
             completed: false,
+            poster_url: None,
         }
     }
 }
+impl Entry {
+    pub fn is_movie(&self) -> bool {
+        crate::streaming::cinejoy::movie_id(&self.source).is_some()
+    }
+}
+
 pub struct History {
     path: Option<PathBuf>,
     entries: Vec<Entry>,
@@ -119,9 +127,7 @@ impl History {
         {
             return;
         }
-        if let Some(index) = index {
-            self.entries.remove(index);
-        }
+        let poster_url = index.and_then(|index| self.entries.remove(index).poster_url);
         self.entries.insert(
             0,
             Entry {
@@ -134,10 +140,19 @@ impl History {
                     .unwrap_or_default()
                     .as_secs(),
                 completed,
+                poster_url,
             },
         );
         self.entries.truncate(LIMIT);
         self.dirty = true;
+    }
+    pub fn set_poster(&mut self, source: &str, poster_url: String) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.source == source)
+            && entry.poster_url.as_ref() != Some(&poster_url)
+        {
+            entry.poster_url = Some(poster_url);
+            self.dirty = true;
+        }
     }
     pub fn remove(&mut self, source: &str) {
         self.entries.retain(|e| e.source != source);
@@ -208,6 +223,36 @@ mod tests {
         assert_eq!(history.entries[0].position, 456.75);
         assert_eq!(history.entries[0].duration, 7200.0);
         assert_eq!(history.entries[1].title, "Second movie");
+    }
+    #[test]
+    fn legacy_history_loads_and_movie_posters_survive_checkpoints_and_restart() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("history.json");
+        let source = "https://cinejoy.pk/watch/movie/210577";
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!([
+                {"source": source, "title": "Gone Girl", "position": 10.0},
+                {"source": "/clip.mp4", "title": "Clip"}
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut history = History::at(path.clone()).unwrap();
+        assert!(history.entries()[0].is_movie());
+        assert!(!history.entries()[1].is_movie());
+        assert!(history.entry(source).unwrap().poster_url.is_none());
+        let poster = "https://image.tmdb.org/t/p/w154/poster.jpg";
+        history.set_poster(source, poster.into());
+        history.record(source, "Gone Girl", 40.0, 6000.0, false);
+        history.record(source, "Gone Girl", 0.0, 6000.0, true);
+        history.flush().unwrap();
+        let saved = History::at(path).unwrap();
+        assert_eq!(
+            saved.entry(source).unwrap().poster_url.as_deref(),
+            Some(poster)
+        );
+        assert!(saved.entry(source).unwrap().completed);
     }
     #[test]
     fn finished_movies_restart_and_history_is_bounded_removable_and_clearable() {

@@ -4,7 +4,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const INPUTS: &[&str] = &["src", "scripts", "Cargo.toml", "Cargo.lock", "build.rs"];
+pub const INPUTS: &[&str] = &[
+    "src",
+    "scripts",
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "watch-protocol",
+];
 
 fn files(path: &Path, output: &mut Vec<PathBuf>) -> io::Result<()> {
     if path.is_dir() {

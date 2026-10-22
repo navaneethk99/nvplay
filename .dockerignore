@@ -1,0 +1,8 @@
+target
+.git
+.DS_Store
+.env
+.env.*
+**/.env
+**/*.pem
+**/*.key

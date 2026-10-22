@@ -4,6 +4,8 @@ use std::time::{Duration, Instant};
 
 pub(super) struct WatchHistory {
     pub store: History,
+    artwork: super::history_artwork::HistoryArtwork,
+    pub movie_posters: std::collections::HashMap<String, String>,
     session: Option<Session>,
     resume: Option<Resume>,
     checkpoint: Instant,
@@ -30,6 +32,8 @@ impl Default for WatchHistory {
         };
         Self {
             store,
+            artwork: Default::default(),
+            movie_posters: Default::default(),
             session: None,
             resume: None,
             checkpoint: Instant::now(),
@@ -81,6 +85,11 @@ impl super::PlayerApp {
             state.duration,
             false,
         );
+        if let Some(url) = self.watch_history.movie_posters.get(&session.source) {
+            self.watch_history
+                .store
+                .set_poster(&session.source, url.clone());
+        }
     }
     pub(super) fn history_loaded(&mut self) {
         if let Some(media) = self.current.and_then(|i| self.queue.get(i)) {
@@ -107,6 +116,11 @@ impl super::PlayerApp {
             self.watch_history
                 .store
                 .record(&session.source, &title, 0.0, duration, true);
+            if let Some(url) = self.watch_history.movie_posters.get(&session.source) {
+                self.watch_history
+                    .store
+                    .set_poster(&session.source, url.clone());
+            }
             self.watch_history.flush();
         }
         self.watch_history.resume = None;
@@ -183,73 +197,185 @@ impl super::PlayerApp {
         let mut chosen = None;
         let mut remove = None;
         let mut clear = false;
-        ui.small("Recently watched · choose a movie to continue");
-        if !self.watch_history.store.entries().is_empty() && ui.button("Clear history").clicked() {
-            clear = true;
-        }
+        self.watch_history
+            .artwork
+            .poll(ui.ctx(), &mut self.watch_history.store);
+        ui.small("Recently watched · choose an item to continue");
         if let Some(error) = &self.watch_history.error {
             ui.colored_label(super::ACCENT, error);
         }
+        let has_history = !self.watch_history.store.entries().is_empty();
+        let footer_height = if has_history {
+            ui.spacing().interact_size.y + ui.spacing().item_spacing.y * 2.0 + 1.0
+        } else {
+            0.0
+        };
         egui::ScrollArea::vertical()
             .id_salt("watch_history")
             .auto_shrink([false, false])
-            .max_height((ui.available_height() - if self.fullscreen { 34.0 } else { 0.0 }).max(0.0))
+            .max_height(
+                (ui.available_height() - footer_height - if self.fullscreen { 34.0 } else { 0.0 })
+                    .max(0.0),
+            )
             .show(ui, |ui| {
                 if self.watch_history.store.entries().is_empty() {
-                    ui.label("No watch history yet. Play a movie to see it here.");
+                    ui.label("No watch history yet. Play a movie or video to see it here.");
                 }
-                for entry in self.watch_history.store.entries() {
-                    ui.push_id(&entry.source, |ui| {
-                        ui.horizontal(|ui| {
-                            let position = super::format_time(entry.position);
-                            let status = if entry.completed {
-                                "Watched · Play again".into()
-                            } else if entry.position > 0.0 {
-                                if entry.duration > 0.0 {
-                                    format!(
-                                        "Resume at {position} / {}",
-                                        super::format_time(entry.duration)
+                for (movies, heading, empty) in [
+                    (true, "Movies", "No movies watched yet."),
+                    (false, "Videos", "No videos watched yet."),
+                ] {
+                    let entries: Vec<_> = self
+                        .watch_history
+                        .store
+                        .entries()
+                        .iter()
+                        .filter(|entry| entry.is_movie() == movies)
+                        .collect();
+                    ui.add_space(8.0);
+                    egui::CollapsingHeader::new(
+                        egui::RichText::new(format!("{heading} · {}", entries.len())).strong(),
+                    )
+                    .id_salt(("history_section", movies))
+                    .default_open(true)
+                    .show_unindented(ui, |ui| {
+                        if entries.is_empty() {
+                            ui.weak(empty);
+                        }
+                        for entry in entries {
+                            ui.push_id(&entry.source, |ui| {
+                                ui.horizontal(|ui| {
+                                    let position = super::format_time(entry.position);
+                                    let status = if entry.completed {
+                                        "Watched · Play again".into()
+                                    } else if entry.position > 0.0 {
+                                        if entry.duration > 0.0 {
+                                            format!(
+                                                "Resume at {position} / {}",
+                                                super::format_time(entry.duration)
+                                            )
+                                        } else {
+                                            format!("Resume at {position}")
+                                        }
+                                    } else {
+                                        "Play from start".into()
+                                    };
+                                    let width = (ui.available_width() - 28.0).max(50.0);
+                                    let height = if movies { 72.0 } else { 60.0 };
+                                    let response = ui
+                                        .add_enabled_ui(self.player.is_some(), |ui| {
+                                            ui.allocate_response(
+                                                egui::vec2(width, height),
+                                                egui::Sense::click(),
+                                            )
+                                        })
+                                        .inner;
+                                    response.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::Button,
+                                            self.player.is_some(),
+                                            format!("Resume {} at {position}", entry.title),
+                                        )
+                                    });
+                                    if ui.is_rect_visible(response.rect) {
+                                        let rect = response.rect;
+                                        let visuals = ui.style().interact(&response);
+                                        ui.painter().rect_filled(rect, 5.0, visuals.bg_fill);
+                                        let size = if movies {
+                                            egui::vec2(40.0, 60.0)
+                                        } else {
+                                            egui::vec2(72.0, 40.5)
+                                        };
+                                        let artwork = egui::Rect::from_min_size(
+                                            egui::pos2(
+                                                rect.left() + 6.0,
+                                                rect.center().y - size.y / 2.0,
+                                            ),
+                                            size,
+                                        );
+                                        if let Some(texture) =
+                                            self.watch_history.artwork.get(entry, ui.ctx())
+                                        {
+                                            egui::Image::new((texture.id(), texture.size_vec2()))
+                                                .fit_to_exact_size(size)
+                                                .corner_radius(3.0)
+                                                .paint_at(ui, artwork);
+                                        } else {
+                                            ui.painter().rect_filled(
+                                                artwork,
+                                                3.0,
+                                                egui::Color32::from_gray(35),
+                                            );
+                                            ui.painter().text(
+                                                artwork.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "▶",
+                                                egui::FontId::proportional(16.0),
+                                                egui::Color32::from_gray(140),
+                                            );
+                                        }
+                                        let left = artwork.right() + 8.0;
+                                        let text_width = (rect.right() - left - 6.0).max(0.0);
+                                        let title = egui::Rect::from_min_size(
+                                            egui::pos2(left, rect.center().y - 20.0),
+                                            egui::vec2(text_width, 20.0),
+                                        );
+                                        ui.place(
+                                            title,
+                                            egui::Label::new(
+                                                egui::RichText::new(&entry.title).strong(),
+                                            )
+                                            .truncate()
+                                            .halign(egui::Align::Min)
+                                            .selectable(false),
+                                        );
+                                        let subtitle = title.translate(egui::vec2(0.0, 22.0));
+                                        ui.place(
+                                            subtitle,
+                                            egui::Label::new(
+                                                egui::RichText::new(status).small().weak(),
+                                            )
+                                            .truncate()
+                                            .halign(egui::Align::Min)
+                                            .selectable(false),
+                                        );
+                                        if entry.duration > 0.0 {
+                                            let progress = if entry.completed {
+                                                1.0
+                                            } else {
+                                                (entry.position / entry.duration).clamp(0.0, 1.0)
+                                                    as f32
+                                            };
+                                            let bar = egui::Rect::from_min_size(
+                                                egui::pos2(left, rect.bottom() - 5.0),
+                                                egui::vec2(text_width * progress, 2.0),
+                                            );
+                                            ui.painter().rect_filled(bar, 1.0, super::ACCENT);
+                                        }
+                                    }
+                                    if response.on_hover_text(&entry.source).clicked() {
+                                        chosen = Some(entry.source.clone());
+                                    }
+                                    if super::icons::small_button(
+                                        ui,
+                                        super::Icon::Close,
+                                        "Remove from history",
                                     )
-                                } else {
-                                    format!("Resume at {position}")
-                                }
-                            } else {
-                                "Play from start".into()
-                            };
-                            let width = (ui.available_width() - 28.0).max(50.0);
-                            let response = ui
-                                .add_enabled_ui(self.player.is_some(), |ui| {
-                                    ui.add_sized(
-                                        [width, 48.0],
-                                        egui::Button::new(format!("{}\n{status}", entry.title))
-                                            .truncate(),
-                                    )
-                                })
-                                .inner;
-                            response.widget_info(|| {
-                                egui::WidgetInfo::labeled(
-                                    egui::WidgetType::Button,
-                                    self.player.is_some(),
-                                    format!("Resume {} at {position}", entry.title),
-                                )
+                                    .clicked()
+                                    {
+                                        remove = Some(entry.source.clone());
+                                    }
+                                });
+                                ui.add_space(4.0);
                             });
-                            if response.on_hover_text(&entry.source).clicked() {
-                                chosen = Some(entry.source.clone());
-                            }
-                            if super::icons::small_button(
-                                ui,
-                                super::Icon::Close,
-                                "Remove from history",
-                            )
-                            .clicked()
-                            {
-                                remove = Some(entry.source.clone());
-                            }
-                        });
-                        ui.add_space(3.0);
+                        }
                     });
                 }
             });
+        if has_history {
+            ui.separator();
+            clear = ui.button("Clear history").clicked();
+        }
         if clear {
             self.watch_history.store.clear();
             self.watch_history.session = None;
@@ -381,6 +507,35 @@ mod tests {
         );
         assert_eq!(app.watch_history.store.entries().len(), 1);
         assert!(app.queue.is_empty());
+    }
+    #[test]
+    fn history_groups_catalog_movies_and_regular_videos() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
+        app.watch_history.store.record(
+            "https://cinejoy.pk/watch/movie/210577",
+            "Gone Girl",
+            20.0,
+            6000.0,
+            false,
+        );
+        app.watch_history
+            .store
+            .record("/missing/clip.mp4", "My clip", 5.0, 30.0, false);
+        app.open_history();
+        frame(&mut app, &ctx, vec![]);
+        let output = frame(&mut app, &ctx, vec![]);
+        let update = output.platform_output.accesskit_update.unwrap();
+        for label in ["Movies · 1", "Videos · 1"] {
+            assert!(
+                update
+                    .nodes
+                    .iter()
+                    .any(|(_, n)| n.label().or(n.value()) == Some(label)),
+                "Missing {label}"
+            );
+        }
     }
     #[test]
     fn clear_history_does_not_reinsert_current_session() {

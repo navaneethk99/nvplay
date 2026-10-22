@@ -2,11 +2,21 @@
 name = "nvplay"
 version = "0.1.0"
 edition = "2024"
+default-run = "nvplay"
 rust-version = "1.88"
 description = "A native, extensible Rust media player powered by libmpv"
 license = "GPL-3.0-or-later"
 
+[workspace]
+members = ["watch-protocol", "watch-server"]
+resolver = "3"
+
 [dependencies]
+watch-protocol = { path = "watch-protocol" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "process", "io-util"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+futures-util = { version = "0.3", features = ["sink"] }
+webrtc = "0.14"
 eframe = { version = "0.33.3", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
 libloading = "0.8"
 rfd = "0.15"
