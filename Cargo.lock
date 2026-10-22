@@ -2617,6 +2617,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "url",
  "watch-protocol",
+ "webrtc",
 ]
 
 [[package]]

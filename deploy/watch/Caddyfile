@@ -1,3 +1,4 @@
 {$WATCH_DOMAIN} {
+    respond /admin/* 404
     reverse_proxy signaling:8787
 }

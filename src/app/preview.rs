@@ -325,6 +325,29 @@ fn extract_cancellable(
     mut cancelled: impl FnMut() -> bool,
 ) -> Option<Vec<u8>> {
     let mut command = Command::new(ffmpeg);
+    // FFmpeg 8/9 rejects legitimate HLS segments with opaque URL suffixes.
+    // Discover the option so older FFmpeg builds keep working as well.
+    let path = url::Url::parse(&request.source)
+        .ok()
+        .map(|u| u.path().to_owned())
+        .unwrap_or_default();
+    if path.to_ascii_lowercase().ends_with(".m3u8") {
+        static PICKY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let supported = PICKY.get_or_init(|| {
+            Command::new(ffmpeg)
+                .args(["-hide_banner", "-h", "demuxer=hls"])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .is_ok_and(|o| {
+                    o.status.success()
+                        && String::from_utf8_lossy(&o.stdout).contains("-extension_picky")
+                })
+        });
+        if *supported {
+            command.args(["-extension_picky", "0"]);
+        }
+    }
     command.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "1", "-ss"])
         .arg(format!("{:.3}", request.millis as f64 / 1000.0))
         .arg("-i").arg(&request.source).args(["-map", &format!("0:v:{}", request.track), "-frames:v", "1", "-an", "-sn", "-filter_threads", "1", "-vf", "scale=160:90:force_original_aspect_ratio=decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2,setsar=1", "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"])

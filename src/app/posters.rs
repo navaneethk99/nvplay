@@ -78,11 +78,11 @@ fn decode(bytes: &[u8]) -> Option<egui::ColorImage> {
         .with_guessed_format()
         .ok()?;
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(512);
-    limits.max_image_height = Some(768);
-    limits.max_alloc = Some(8 * 1024 * 1024);
+    limits.max_image_width = Some(2048);
+    limits.max_image_height = Some(2048);
+    limits.max_alloc = Some(16 * 1024 * 1024);
     reader.limits(limits);
-    let rgba = reader.decode().ok()?.to_rgba8();
+    let rgba = reader.decode().ok()?.thumbnail(512, 768).to_rgba8();
     Some(egui::ColorImage::from_rgba_unmultiplied(
         [rgba.width() as usize, rgba.height() as usize],
         rgba.as_raw(),

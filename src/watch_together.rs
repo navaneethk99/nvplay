@@ -1,5 +1,7 @@
+mod azure;
 mod host;
 mod media;
+mod video;
 
 use std::{path::PathBuf, sync::mpsc};
 use watch_protocol::{Control, Playback};
@@ -8,12 +10,19 @@ use watch_protocol::{Control, Playback};
 pub struct Snapshot {
     pub source: String,
     pub audio_source: Option<String>,
+    pub video_headers: String,
+    pub audio_headers: String,
     pub video: bool,
     pub audio: bool,
+    pub width: i64,
+    pub height: i64,
+    pub bitrate: u64,
+    pub access: watch_protocol::Access,
     pub state: Playback,
 }
 pub enum Event {
     Created(String),
+    Status(String),
     Viewers(usize),
     Control(Control),
     Error(String),

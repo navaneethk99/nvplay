@@ -67,16 +67,21 @@ impl HistoryArtwork {
             .retain(|source, _| history.entry(source).is_some());
     }
     pub fn get(&mut self, entry: &Entry, ctx: &egui::Context) -> Option<egui::TextureHandle> {
-        if entry.is_movie() {
-            if let Some(url) = &entry.poster_url {
-                return self.posters.get(url, ctx);
+        let catalog = crate::streaming::cinejoy::movie_id(&entry.source);
+        if let Some(url) = &entry.poster_url {
+            if let Some(texture) = self.posters.get(url, ctx) {
+                return Some(texture);
             }
+            if catalog.is_some() {
+                return None;
+            }
+        }
+        if let Some(id) = catalog {
             if self.movies.contains_key(&entry.source)
                 || self.movies.values().filter(|p| **p).count() >= 2
             {
                 return None;
             }
-            let id = crate::streaming::cinejoy::movie_id(&entry.source)?;
             self.movies.insert(entry.source.clone(), true);
             let source = entry.source.clone();
             let sender = self.sender.clone();
@@ -114,7 +119,10 @@ impl HistoryArtwork {
         if self.frames.values().filter(|f| f.pending).count() >= 2 {
             return None;
         }
-        let ffmpeg = self.ffmpeg.clone()?;
+        let ffmpeg = self.ffmpeg.clone();
+        if ffmpeg.is_none() && !crate::streaming::is_webpage(&entry.source) {
+            return None;
+        }
         self.frames.insert(
             entry.source.clone(),
             Frame {
@@ -126,7 +134,16 @@ impl HistoryArtwork {
         let sender = self.sender.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let image = super::preview::first_frame(&ffmpeg, &source);
+            let (thumbnail, playable) = network_artwork(&source);
+            if let Some(thumbnail) = thumbnail {
+                let _ = sender.send(Artwork::Poster(source.clone(), Some(thumbnail)));
+                ctx.request_repaint();
+            }
+            // Also retain a first-frame fallback if a site's thumbnail expires
+            // or its format cannot be decoded. Resolution stays thumbnail-sized.
+            let image = ffmpeg.and_then(|ffmpeg| {
+                super::preview::first_frame(&ffmpeg, playable.as_deref().unwrap_or(&source))
+            });
             let _ = sender.send(Artwork::Frame(source, image));
             ctx.request_repaint();
         });
@@ -134,9 +151,107 @@ impl HistoryArtwork {
     }
 }
 
+/// Resolve only website pages. Direct streams go straight to the bounded frame
+/// decoder; yt-dlp handles site metadata without downloading the whole video.
+fn network_artwork(source: &str) -> (Option<String>, Option<String>) {
+    use std::{io::Read, process::Stdio, time::Instant};
+    if !crate::streaming::is_webpage(source) {
+        return (None, None);
+    }
+    let Some(tool) = crate::streaming::find_tool("NVPLAY_YTDLP", "yt-dlp") else {
+        return (None, None);
+    };
+    let mut command = crate::streaming::tool_command(&tool);
+    command
+        .args([
+            "--no-playlist",
+            "--playlist-items",
+            "1",
+            "--no-warnings",
+            "--skip-download",
+            "--socket-timeout",
+            "8",
+            "--retries",
+            "0",
+            "--format",
+            "best[height<=360]/worstvideo/worst",
+            "--print",
+            "%(thumbnail)s",
+            "--print",
+            "%(url)s",
+            "--",
+            source,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let Ok(mut child) = command.spawn() else {
+        return (None, None);
+    };
+    let stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.take(16 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+        (bytes.len() <= 16 * 1024).then_some(bytes)
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let success = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+        }
+    };
+    let bytes = reader.join().ok().flatten();
+    if !success {
+        return (None, None);
+    }
+    bytes
+        .and_then(|b| String::from_utf8(b).ok())
+        .map_or((None, None), |text| {
+            let mut lines = text.lines();
+            let thumbnail = lines.next().filter(|s| public_image(s)).map(str::to_owned);
+            let playable = lines.next().filter(|s| public_image(s)).map(str::to_owned);
+            (thumbnail, playable)
+        })
+}
+fn public_image(value: &str) -> bool {
+    url::Url::parse(value)
+        .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires yt-dlp, FFmpeg, and public website thumbnail access"]
+    fn website_history_resolves_and_downloads_its_thumbnail() {
+        let source = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+        let ctx = egui::Context::default();
+        let mut artwork = HistoryArtwork::default();
+        let mut history = History::memory();
+        history.record(source, "Website video", 1.0, 10.0, false);
+        assert!(history.entry(source).unwrap().is_movie());
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            artwork.poll(&ctx, &mut history);
+            if let Some(texture) = artwork.get(history.entry(source).unwrap(), &ctx) {
+                assert!(texture.size()[0] > 0);
+                assert!(history.entry(source).unwrap().poster_url.is_some());
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Website thumbnail did not load"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     #[ignore = "requires FFmpeg; generates a two-color video and checks history uses its first frame"]
     fn history_thumbnail_decodes_first_frame_and_reuses_texture() {
@@ -197,6 +312,56 @@ mod tests {
             pixel.r() > 240 && pixel.b() < 15,
             "expected red first frame: {pixel:?}"
         );
+        // The same frame must appear for direct HTTP streams in Movies.
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let bytes = std::fs::read(&source).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let network = format!("http://{}/movie.mp4", listener.local_addr().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while !stopped.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+                if let Ok((mut socket, _)) = listener.accept() {
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(1)))
+                        .unwrap();
+                    let mut request = [0; 4096];
+                    let _ = socket.read(&mut request);
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    let _ = socket.write_all(headers.as_bytes());
+                    let _ = socket.write_all(&bytes);
+                } else {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        });
+        history.record(&network, "Network movie", 1.0, 2.0, false);
+        assert!(history.entry(&network).unwrap().is_movie());
+        artwork.get(history.entry(&network).unwrap(), &ctx);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            artwork.poll(&ctx, &mut history);
+            if let Some(texture) = artwork.get(history.entry(&network).unwrap(), &ctx) {
+                assert_eq!(texture.size(), [160, 90]);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "HTTP stream poster did not load"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
         history.clear();
         artwork.poll(&ctx, &mut history);
         assert!(artwork.frames.is_empty());

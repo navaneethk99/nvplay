@@ -4,13 +4,14 @@ use eframe::egui;
 use watch_protocol::{Control, Playback};
 
 pub(super) struct WatchParty {
-    pub open: bool,
+    pub(super) access: watch_protocol::Access,
     host: Option<Host>,
     endpoint: String,
     key: String,
     url: String,
     viewers: usize,
     error: Option<String>,
+    status: String,
     generation: u64,
     source: String,
 }
@@ -21,9 +22,12 @@ impl Default for WatchParty {
             .and_then(|dir| std::fs::read_to_string(dir.join("watch-server.txt")).ok())
             .unwrap_or_default();
         Self {
-            open: false,
+            access: Default::default(),
             host: None,
-            endpoint: std::env::var("NVPLAY_WATCH_URL").unwrap_or(saved),
+            endpoint: std::env::var("NVPLAY_WATCH_URL")
+                .unwrap_or(saved)
+                .trim()
+                .to_owned(),
             key: std::env::var("NVPLAY_WATCH_HOST_KEY").unwrap_or_else(|_| {
                 crate::settings::directory()
                     .ok()
@@ -34,6 +38,7 @@ impl Default for WatchParty {
             url: String::new(),
             viewers: 0,
             error: None,
+            status: "Creating your viewing link…".into(),
             generation: 0,
             source: String::new(),
         }
@@ -71,6 +76,12 @@ impl PlayerApp {
         Some(Snapshot {
             source: self.watch_party.source.clone(),
             audio_source: None,
+            video_headers: String::new(),
+            audio_headers: String::new(),
+            width: s.video_width,
+            height: s.video_height,
+            bitrate: 0,
+            access: self.watch_party.access,
             video: s.tracks.iter().any(|t| t.kind == "video" && t.selected),
             audio: s.tracks.iter().any(|t| t.kind == "audio" && t.selected),
             state: Playback {
@@ -110,6 +121,7 @@ impl PlayerApp {
         )?);
         self.watch_party.generation = self.playback_generation;
         self.watch_party.error = None;
+        self.watch_party.status = "Creating your viewing link…".into();
         Ok(())
     }
     pub(super) fn poll_watch_party(&mut self) {
@@ -130,6 +142,7 @@ impl PlayerApp {
             .unwrap_or_default();
         for event in events {
             match event {
+                Event::Status(status) => self.watch_party.status = status,
                 Event::Created(url) => self.watch_party.url = url,
                 Event::Viewers(count) => self.watch_party.viewers = count,
                 Event::Control(control) => match control {
@@ -143,7 +156,8 @@ impl PlayerApp {
                 },
                 Event::Error(error) => {
                     self.watch_party.error = Some(error);
-                    self.watch_party.open = true;
+                    self.show_playlist = true;
+                    self.sidebar_tab = super::SidebarTab::WatchTogether;
                 }
                 Event::Closed => self.watch_party.end(),
             }
@@ -159,22 +173,42 @@ impl PlayerApp {
             }
         }
     }
-    pub(super) fn watch_party_dialog(&mut self, ctx: &egui::Context) {
-        if !self.watch_party.open {
-            return;
+    pub(super) fn watch_party_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        if self.watch_party.active() {
+            ui.strong("Session active");
+            if ui
+                .add_sized(
+                    [ui.available_width(), 32.0],
+                    egui::Button::new("End session")
+                        .fill(egui::Color32::from_rgb(145, 40, 40)),
+                )
+                .on_hover_text("Stop sharing, disconnect all viewers, and expire the viewing link. Your video keeps playing.")
+                .clicked()
+            {
+                self.watch_party.end();
+            }
+            ui.separator();
         }
-        let mut open = true;
-        egui::Window::new("Watch together")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(410.0)
-            .show(ctx, |ui| {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.label("Share at the playing video's original resolution.");
+            if let Some(p) = &self.player
+                && p.state.video_width > 0 && p.state.video_height > 0 {
+                ui.label(format!("{} × {} · Original resolution", p.state.video_width, p.state.video_height));
+            }
+            ui.small("Higher resolutions need more upload bandwidth. Keep nvplay open while sharing.");
+            ui.separator();
+            ui.strong("Viewer access");
+            ui.checkbox(&mut self.watch_party.access.play_pause, "Allow play and pause");
+            ui.checkbox(&mut self.watch_party.access.seek, "Allow seeking");
+            ui.checkbox(&mut self.watch_party.access.allow_join, "Allow new viewers to join");
+            ui.small("Applies to everyone with the link. Changes take effect during the session. Volume and fullscreen stay personal.");
+            ui.separator();
                 if self.watch_party.active() {
                     if self.watch_party.url.is_empty() {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label("Creating your viewing link…");
+                            ui.label(&self.watch_party.status);
                         });
                     } else {
                         ui.label("Send this link to your friends. They can join in a browser.");
@@ -185,20 +219,17 @@ impl PlayerApp {
                         if ui.button("Copy viewing link").clicked() {
                             ctx.copy_text(self.watch_party.url.clone());
                         }
+                        if self.watch_party.status.starts_with("Streaming") { ui.small(&self.watch_party.status); }
                         ui.label(format!(
                             "{} of {} viewers joined",
                             self.watch_party.viewers,
                             watch_protocol::MAX_VIEWERS
                         ));
                     }
-                    ui.label("Everyone with the link can play, pause, and seek.");
-                    ui.label("Keep nvplay open while sharing.");
-                    if ui.button("End watch party").clicked() {
-                        self.watch_party.end();
-                    }
+
                 } else {
                     ui.label("Watch your current video with up to six friends.");
-                    ui.label("Everyone can play, pause, and seek together.");
+
                     if self.watch_party.endpoint.is_empty() {
                         ui.label("Configure your public watch service to create viewing links.");
                     }
@@ -222,7 +253,7 @@ impl PlayerApp {
                         .add_enabled(available, egui::Button::new("Create viewing link"))
                         .clicked()
                     {
-                        match self.start_watch_party(ctx) {
+                        match self.start_watch_party(&ctx) {
                             Err(error) => self.watch_party.error = Some(error),
                             Ok(()) => {
                                 if let Ok(directory) = crate::settings::directory() {
@@ -242,7 +273,6 @@ impl PlayerApp {
                     ui.colored_label(egui::Color32::LIGHT_RED, error);
                 }
             });
-        self.watch_party.open = open;
     }
 }
 
@@ -265,7 +295,9 @@ mod tests {
         app.watch_party.key = std::env::var("NVPLAY_WATCH_TEST_HOST_KEY").unwrap_or_default();
         let started = Instant::now();
         let mut began = false;
-        while started.elapsed() < Duration::from_secs(150) {
+        let mut positioned = false;
+        let mut state_second = u64::MAX;
+        while started.elapsed() < Duration::from_secs(360) {
             for event in app.player.as_mut().unwrap().poll() {
                 app.handle_playback_event(event);
             }
@@ -276,10 +308,48 @@ mod tests {
                     .as_ref()
                     .is_some_and(|p| p.state.duration > 0.0 && !p.state.tracks.is_empty())
             {
+                if !positioned
+                    && let Ok(position) = std::env::var("NVPLAY_WATCH_TEST_START_AT")
+                        .unwrap_or_default()
+                        .parse::<f64>()
+                {
+                    app.commit_seek(position);
+                    positioned = true;
+                    std::thread::sleep(Duration::from_millis(30));
+                    continue;
+                }
+                if app.player.as_ref().unwrap().state.seeking {
+                    continue;
+                }
+                if std::env::var("NVPLAY_WATCH_TEST_START_PAUSED").as_deref() == Ok("1")
+                    && !app.player.as_ref().unwrap().state.paused
+                {
+                    app.command(&["set", "pause", "yes"]);
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                }
                 app.start_watch_party(&ctx).unwrap();
                 began = true;
             }
+            if dir.join("restrict-access").exists() {
+                app.watch_party.access = watch_protocol::Access {
+                    play_pause: false,
+                    seek: false,
+                    allow_join: false,
+                };
+            }
+            if dir.join("restore-access").exists() {
+                app.watch_party.access = Default::default();
+            }
             app.poll_watch_party();
+            if state_second != started.elapsed().as_secs() {
+                state_second = started.elapsed().as_secs();
+                if let Some(player) = &app.player {
+                    let s = &player.state;
+                    let state = serde_json::json!({"width": s.video_width, "height": s.video_height, "position": s.position, "paused": s.paused, "buffering": s.buffering, "seeking": s.seeking, "loading": app.loading, "video": s.tracks.iter().any(|t| t.kind == "video" && t.selected), "audio": s.tracks.iter().any(|t| t.kind == "audio" && t.selected)});
+                    let _ = std::fs::write(dir.join("host-state.json"), state.to_string());
+                }
+            }
             if let Some(error) = &app.watch_party.error {
                 panic!("sharing failed: {error}");
             }

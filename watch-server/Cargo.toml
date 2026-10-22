@@ -16,6 +16,7 @@ base64 = "0.22"
 hmac = "0.12"
 sha1 = "0.10"
 url = "2.5"
+webrtc = "0.14"
 
 [dev-dependencies]
 tokio-tungstenite = "0.28"

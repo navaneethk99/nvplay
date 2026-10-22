@@ -37,6 +37,7 @@ enum SidebarTab {
     Playlist,
     Subtitles,
     History,
+    WatchTogether,
 }
 
 #[derive(Clone)]
@@ -434,7 +435,6 @@ impl PlayerApp {
         }
         if ctx.wants_keyboard_input()
             || self.show_url
-            || self.watch_party.open
             || self.show_help
             || self.movie_search.open
             || self.subtitle_search.open
@@ -674,6 +674,7 @@ impl PlayerApp {
                         SidebarTab::Playlist => format!("Playlist ({})", self.queue.len()),
                         SidebarTab::Subtitles => "Subtitles".into(),
                         SidebarTab::History => "History".into(),
+                        SidebarTab::WatchTogether => "Watch together".into(),
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icons::small_button(ui, Icon::Close, "Close playlist sidebar").clicked()
@@ -682,12 +683,21 @@ impl PlayerApp {
                         }
                     });
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Playlist, "Playlist");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Subtitles, "Subtitles");
                     ui.selectable_value(&mut self.sidebar_tab, SidebarTab::History, "History");
+                    ui.selectable_value(
+                        &mut self.sidebar_tab,
+                        SidebarTab::WatchTogether,
+                        "Watch together",
+                    );
                 });
                 ui.separator();
+                if self.sidebar_tab == SidebarTab::WatchTogether {
+                    self.watch_party_panel(ui);
+                    return;
+                }
                 if self.sidebar_tab == SidebarTab::Subtitles {
                     self.subtitle_controls(ui);
                     return;
@@ -907,7 +917,7 @@ impl PlayerApp {
             if icons::button(
                 ui,
                 Icon::Playlist,
-                "Playlist sidebar (Ctrl/Cmd+L)",
+                "Sidebar: playlist, subtitles, history, watch together (Ctrl/Cmd+L)",
                 self.show_playlist,
             )
             .clicked()
@@ -934,13 +944,6 @@ impl PlayerApp {
                 .clicked()
             {
                 self.next();
-            }
-            if ui
-                .selectable_label(self.watch_party.active(), "Watch together")
-                .on_hover_text("Create a viewing link for friends")
-                .clicked()
-            {
-                self.watch_party.open = true;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icons::button(ui, Icon::Fullscreen, "Fullscreen (F)", self.fullscreen).clicked()
@@ -1807,7 +1810,6 @@ impl PlayerApp {
         });
         let pinned = egui::Popup::is_any_open(ctx)
             || self.show_url
-            || self.watch_party.open
             || self.movie_search.open
             || self.subtitle_search.open
             || self.show_help
@@ -1847,7 +1849,6 @@ impl PlayerApp {
 
         #[cfg(target_os = "macos")]
         self.updates.ui(ctx);
-        self.watch_party_dialog(ctx);
         self.network_dialog(ctx);
         self.movie_search_dialog(ctx);
         self.subtitle_search_dialog(ctx);
@@ -2239,6 +2240,31 @@ mod tests {
     }
 
     #[test]
+    fn watch_together_lives_in_sidebar_with_viewer_access_controls() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        theme(&ctx);
+        let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
+        app.initial_resize = false;
+        app.show_playlist = true;
+        for _ in 0..4 {
+            draw(&mut app, vec![]);
+        }
+        let output = draw(&mut app, vec![]);
+        click(&mut app, named_rect(&output, "Watch together").center());
+        assert!(app.sidebar_tab == SidebarTab::WatchTogether);
+        for _ in 0..4 {
+            draw(&mut app, vec![]);
+        }
+        let output = draw(&mut app, vec![]);
+        let checkbox = named_rect(&output, "Allow play and pause").center();
+        click(&mut app, checkbox);
+        assert!(!app.watch_party.access.play_pause);
+        assert!(app.watch_party.access.seek);
+        named_rect(&draw(&mut app, vec![]), "Allow new viewers to join");
+    }
+
+    #[test]
     fn playlist_manual_move_keeps_the_current_media_selected() {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
@@ -2313,7 +2339,7 @@ mod tests {
         let next = named_rect(&output, "Next");
         assert!(previous.right() < repeat.left() && repeat.right() < next.left());
         assert_eq!(repeat.center().y, previous.center().y);
-        let toggle = named_rect(&output, "Playlist sidebar").center();
+        let toggle = named_rect(&output, "Sidebar: playlist").center();
         click(&mut app, toggle);
         let output = draw(&mut app, vec![]);
         assert!(app.show_playlist);

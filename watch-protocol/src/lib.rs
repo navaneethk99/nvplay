@@ -41,6 +41,32 @@ impl Control {
     }
 }
 
+/// Host-controlled rights, applied to all current and future viewers.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Access {
+    pub play_pause: bool,
+    pub seek: bool,
+    pub allow_join: bool,
+}
+impl Default for Access {
+    fn default() -> Self {
+        Self {
+            play_pause: true,
+            seek: true,
+            allow_join: true,
+        }
+    }
+}
+impl Access {
+    pub fn permits(&self, control: &Control) -> bool {
+        match control {
+            Control::Seek { .. } => self.seek,
+            _ => self.play_pause,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IceServer {
@@ -56,6 +82,8 @@ pub struct IceServer {
 pub enum Message {
     Create {
         key: String,
+        #[serde(default)]
+        access: Access,
     },
     Created {
         url: String,
@@ -64,10 +92,16 @@ pub enum Message {
     Join {
         room: String,
         token: String,
+        #[serde(default)]
+        client_offers: bool,
     },
     Joined {
         peer: String,
+        #[serde(default)]
+        client_offers: bool,
         ice_servers: Vec<IceServer>,
+        #[serde(default)]
+        access: Access,
     },
     PeerJoined {
         peer: String,
@@ -90,8 +124,20 @@ pub enum Message {
     State {
         state: Playback,
     },
+    /// Relay-observed video delivery and transport queue growth on the uplink.
+    /// A host sends zero/zero before publishing to opt into these reports.
+    Uplink {
+        bitrate: u64,
+        queue_ms: u64,
+    },
     Control {
         control: Control,
+    },
+    Access {
+        access: Access,
+    },
+    Denied {
+        message: String,
     },
     Ended,
     Error {

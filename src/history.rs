@@ -33,7 +33,7 @@ impl Default for Entry {
 }
 impl Entry {
     pub fn is_movie(&self) -> bool {
-        crate::streaming::cinejoy::movie_id(&self.source).is_some()
+        crate::streaming::is_network(&self.source)
     }
 }
 
@@ -207,6 +207,29 @@ pub fn source_identity(source: &str) -> String {
 mod tests {
     use super::*;
     use crate::subtitles::library::tests::Fixture;
+    #[test]
+    fn network_history_is_grouped_as_movies_including_older_entries() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("history.json");
+        let mut history = History::at(path.clone()).unwrap();
+        for source in [
+            "https://example.com/watch?v=123",
+            "https://example.com/movie.mp4",
+            "rtsp://example.com/live",
+        ] {
+            history.record(source, "Stream", 10.0, 90.0, false);
+            assert!(history.entry(source).unwrap().is_movie());
+        }
+        history.record("/tmp/clip.mp4", "Local", 0.0, 90.0, false);
+        history.flush().unwrap();
+        let restored = History::at(path).unwrap();
+        assert_eq!(
+            restored.entries().iter().filter(|e| e.is_movie()).count(),
+            3
+        );
+        assert!(!restored.entries()[0].is_movie());
+    }
+
     #[test]
     fn history_restores_progress_and_recent_order_without_duplicates() {
         let fixture = Fixture::new();

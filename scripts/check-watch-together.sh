@@ -28,7 +28,11 @@ fi
 if [ -z "${NVPLAY_CHROME:-}" ]; then "$NVPLAY_PLAYWRIGHT_MODULE/cli.js" install chromium; fi
 NVPLAY_TEST_MEDIA="$NVPLAY_WATCH_TEST_DIR/movie.mp4"
 export NVPLAY_TEST_MEDIA
-ffmpeg -hide_banner -loglevel error -f lavfi -i 'testsrc2=size=640x360:rate=30' -f lavfi -i 'sine=frequency=440:sample_rate=48000' -t 90 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac "$NVPLAY_TEST_MEDIA"
+watch_filter=null
+if [ "${NVPLAY_WATCH_LATENCY_CHECK:-0}" = 1 ]; then
+  watch_filter=$(node -e 'process.stdout.write("drawbox=x=0:y=1020:w=420:h=60:color=black:t=fill," + Array.from({length:10},(_,i)=>`drawbox=x=${i*40+4}:y=1030:w=32:h=40:color=white:t=fill:enable=${String.fromCharCode(39)}mod(floor(t*10/${2**i}),2)${String.fromCharCode(39)}`).join(","))')
+fi
+ffmpeg -hide_banner -loglevel error -f lavfi -i 'testsrc2=size=1920x1080:rate=30' -f lavfi -i 'sine=frequency=440:sample_rate=48000' -t 90 -vf "$watch_filter" -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac "$NVPLAY_TEST_MEDIA"
 "$CARGO" build --locked -p nvplay-watch-server
 NVPLAY_WATCH_BIND=127.0.0.1:8787 NVPLAY_WATCH_PUBLIC_URL=http://localhost:8787 NVPLAY_WATCH_HOST_KEY= NVPLAY_TURN_URLS= target/debug/nvplay-watch-server >"$NVPLAY_WATCH_TEST_DIR/server.log" 2>&1 &
 server_pid=$!

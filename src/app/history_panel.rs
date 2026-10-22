@@ -281,11 +281,14 @@ impl super::PlayerApp {
                                         let rect = response.rect;
                                         let visuals = ui.style().interact(&response);
                                         ui.painter().rect_filled(rect, 5.0, visuals.bg_fill);
-                                        let size = if movies {
-                                            egui::vec2(40.0, 60.0)
-                                        } else {
-                                            egui::vec2(72.0, 40.5)
-                                        };
+                                        let size =
+                                            if crate::streaming::cinejoy::movie_id(&entry.source)
+                                                .is_some()
+                                            {
+                                                egui::vec2(40.0, 60.0)
+                                            } else {
+                                                egui::vec2(72.0, 40.5)
+                                            };
                                         let artwork = egui::Rect::from_min_size(
                                             egui::pos2(
                                                 rect.left() + 6.0,
@@ -509,7 +512,7 @@ mod tests {
         assert!(app.queue.is_empty());
     }
     #[test]
-    fn history_groups_catalog_movies_and_regular_videos() {
+    fn history_groups_catalog_and_network_movies_separately_from_local_videos() {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
@@ -520,6 +523,13 @@ mod tests {
             6000.0,
             false,
         );
+        app.watch_history.store.record(
+            "https://example.com/stream.m3u8",
+            "Network movie",
+            12.0,
+            90.0,
+            false,
+        );
         app.watch_history
             .store
             .record("/missing/clip.mp4", "My clip", 5.0, 30.0, false);
@@ -527,7 +537,7 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         let output = frame(&mut app, &ctx, vec![]);
         let update = output.platform_output.accesskit_update.unwrap();
-        for label in ["Movies · 1", "Videos · 1"] {
+        for label in ["Movies · 2", "Videos · 1"] {
             assert!(
                 update
                     .nodes

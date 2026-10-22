@@ -1,12 +1,15 @@
 use super::{
     Emitter, Event, Snapshot,
-    media::{Encoder, Tracks},
+    media::{AdaptiveRate, Encoder, HlsOptions, Tracks, video_bitrate},
 };
 use futures_util::{SinkExt, StreamExt};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -25,7 +28,48 @@ use webrtc::{
     track::track_local::TrackLocal,
 };
 
+fn media_url(metadata: &serde_json::Value) -> Option<String> {
+    let value = metadata["url"].as_str()?;
+    url::Url::parse(value)
+        .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())?;
+    Some(value.to_owned())
+}
+fn media_headers(format: &serde_json::Value, metadata: &serde_json::Value) -> String {
+    let mut headers = metadata["http_headers"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if let Some(overrides) = format["http_headers"].as_object() {
+        headers.extend(overrides.clone());
+    }
+    let mut result = String::new();
+    {
+        for (name, value) in &headers {
+            let Some(value) = value.as_str() else {
+                continue;
+            };
+            if name.is_empty()
+                || name.len() > 128
+                || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+                || value.contains(['\r', '\n', '\0'])
+                || value.len() > 8192
+                || result.len() + name.len() + value.len() > 32768
+            {
+                continue;
+            }
+            result.push_str(name);
+            result.push_str(": ");
+            result.push_str(value);
+            result.push_str("\r\n");
+        }
+    }
+    result
+}
+
 struct Peer {
+    loss: Arc<AtomicU8>,
+    estimate: Arc<AtomicU64>,
     connection: Arc<RTCPeerConnection>,
     pending: Vec<webrtc::ice_transport::ice_candidate::RTCIceCandidateInit>,
     rtcp: Vec<tokio::task::JoinHandle<()>>,
@@ -51,6 +95,15 @@ async fn peer(
         .map_err(|_| "Could not initialize WebRTC codecs")?;
     let registry = register_default_interceptors(Registry::new(), &mut engine)
         .map_err(|_| "Could not initialize WebRTC transport")?;
+    engine
+        .register_header_extension(
+            webrtc::rtp_transceiver::rtp_codec::RTCRtpHeaderExtensionCapability {
+                uri: webrtc::sdp::extmap::ABS_SEND_TIME_URI.into(),
+            },
+            webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video,
+            None,
+        )
+        .map_err(|_| "Could not configure network timing")?;
     let api = APIBuilder::new()
         .with_media_engine(engine)
         .with_interceptor_registry(registry)
@@ -84,6 +137,8 @@ async fn peer(
             }
         })
     }));
+    let loss = Arc::new(AtomicU8::new(0));
+    let estimate = Arc::new(AtomicU64::new(0));
     let mut rtcp = vec![];
     let result = async {
         let mut locals: Vec<Arc<dyn TrackLocal + Send + Sync>> = vec![];
@@ -94,14 +149,26 @@ async fn peer(
             locals.push(tracks.audio.clone());
         }
         for track in locals {
+            let video = track.kind() == webrtc::rtp_transceiver::rtp_codec::RTPCodecType::Video;
             let sender = connection
                 .add_track(track)
                 .await
                 .map_err(|_| "Could not attach a media track")?;
-            // Drain RTCP so NACK feedback and sender reports continue to run.
+            let loss = loss.clone();
+            let estimate = estimate.clone();
             rtcp.push(tokio::spawn(async move {
-                let mut buffer = [0; 1500];
-                while sender.read(&mut buffer).await.is_ok() {}
+                while let Ok((packets, _)) = sender.read_rtcp().await {
+                    if !video { continue; }
+                    for packet in packets {
+                        if let Some(report) = packet.as_any().downcast_ref::<webrtc::rtcp::receiver_report::ReceiverReport>() {
+                            for reception in &report.reports { loss.fetch_max(reception.fraction_lost, Ordering::Relaxed); }
+                        }
+                        if let Some(remb) = packet.as_any().downcast_ref::<webrtc::rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate>()
+                            && remb.bitrate.is_finite() && remb.bitrate > 0.0 {
+                            estimate.store(remb.bitrate as u64, Ordering::Relaxed);
+                        }
+                    }
+                }
             }));
         }
         let offer = connection
@@ -131,6 +198,8 @@ async fn peer(
         return Err(error);
     }
     Ok(Peer {
+        loss,
+        estimate,
         connection,
         pending: vec![],
         rtcp,
@@ -145,6 +214,10 @@ pub(super) async fn run(
     mut stopped: oneshot::Receiver<()>,
     emit: Emitter,
 ) -> Result<(), String> {
+    tokio::select! {
+        _ = &mut stopped => return Ok(()),
+        result = super::azure::ensure_running(&endpoint, &emit) => result?,
+    }
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE))
         .max_frame_size(Some(MAX_MESSAGE));
@@ -155,9 +228,12 @@ pub(super) async fn run(
     };
     socket
         .send(WsMessage::Text(
-            serde_json::to_string(&Message::Create { key })
-                .unwrap()
-                .into(),
+            serde_json::to_string(&Message::Create {
+                key,
+                access: snapshots.borrow().access,
+            })
+            .unwrap()
+            .into(),
         ))
         .await
         .map_err(|_| "The watch service disconnected")?;
@@ -173,9 +249,16 @@ pub(super) async fn run(
             .args([
                 "--no-playlist",
                 "--no-warnings",
-                "--get-url",
+                "--dump-single-json",
+                "--skip-download",
+                "--check-formats",
+                "--socket-timeout", "8", "--retries", "1", "--extractor-retries", "1",
                 "--format",
-                "bestvideo[height<=720]+bestaudio/best",
+                &if initial.height > 0 {
+                    format!("bestvideo[height={0}][vcodec^=avc1]+bestaudio/best[height={0}][vcodec^=avc1]/bestvideo[height={0}]+bestaudio/best[height={0}]/bestvideo[height>{0}]+bestaudio/best[height>{0}]", initial.height)
+                } else {
+                    "bestvideo+bestaudio/best".into()
+                },
                 "--",
                 &initial.source,
             ])
@@ -185,41 +268,73 @@ pub(super) async fn run(
             _ = &mut stopped => return Ok(()),
             output = tokio::time::timeout(Duration::from_secs(35), command.output()) => output.map_err(|_| "Website video resolution timed out")?.map_err(|_| "Could not run yt-dlp")?,
         };
-        let text = String::from_utf8(output.stdout)
-            .map_err(|_| "Website returned an invalid media URL")?;
-        let mut lines = text
-            .lines()
-            .filter(|s| s.starts_with("https://") || s.starts_with("http://"));
-        initial.source = lines
-            .next()
-            .filter(|_| output.status.success())
-            .ok_or("Could not resolve this website video for sharing")?
-            .to_owned();
-        initial.audio_source = lines.next().map(str::to_owned);
+        if output.stdout.len() > 4 * 1024 * 1024 {
+            return Err("Website media metadata is too large.".into());
+        }
+        if !output.status.success() {
+            return Err(
+                "Could not resolve a playable website video at the current resolution.".into(),
+            );
+        }
+        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|_| "The website returned invalid media metadata")?;
+        let formats = metadata["requested_formats"]
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![metadata.clone()]);
+        let video = formats
+            .iter()
+            .find(|f| f["vcodec"].as_str().is_some_and(|c| c != "none"))
+            .unwrap_or(&metadata);
+        initial.source =
+            media_url(video).ok_or("The website did not return a playable video address")?;
+        initial.video_headers = media_headers(video, &metadata);
+        if let Some(audio) = formats.iter().find(|f| {
+            f["acodec"].as_str().is_some_and(|c| c != "none")
+                && media_url(f).as_deref() != Some(initial.source.as_str())
+        }) {
+            initial.audio_source = media_url(audio);
+            initial.audio_headers = media_headers(audio, &metadata);
+        }
     }
     let resolved_source = initial.source.clone();
     let resolved_audio = initial.audio_source.clone();
+    let resolved_video_headers = initial.video_headers.clone();
+    let resolved_audio_headers = initial.audio_headers.clone();
+    let mut hls = HlsOptions::discover(&ffmpeg).await;
     let tracks = Tracks::new();
     let mut peers: HashMap<String, Peer> = HashMap::new();
-    let mut ice = vec![];
+    let mut viewers = HashSet::new();
     let (outbound, mut outgoing) = mpsc::channel::<Message>(128);
     let mut encoder: Option<Encoder> = None;
     let mut preview_at: Option<(f64, usize)> = None;
     let mut snapshot = initial;
+    let mut rate = AdaptiveRate::new(
+        video_bitrate(snapshot.width, snapshot.height),
+        Instant::now(),
+    );
+    snapshot.bitrate = rate.rate;
     snapshots.borrow_and_update();
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut last_state = Instant::now() - Duration::from_secs(1);
     let mut created = false;
+    let mut staged_url = None;
     let mut handshake_deadline = Box::pin(tokio::time::sleep(Duration::from_secs(15)));
     let result = async {
         loop {
             tokio::select! {
                 _ = &mut stopped => { break; }
-                _ = &mut handshake_deadline, if !created => return Err("The watch service did not create a session".into()),
+                _ = &mut handshake_deadline, if !created || staged_url.is_some() => return Err("The watch service did not establish the streaming uplink".into()),
                 changed = snapshots.changed() => {
                     if changed.is_err() { break; }
-                    snapshot = snapshots.borrow_and_update().clone();
+                    let next = snapshots.borrow_and_update().clone();
+                    if next.access != snapshot.access {
+                        socket.send(WsMessage::Text(serde_json::to_string(&Message::Access { access: next.access }).unwrap().into())).await.map_err(|_| "The watch service disconnected")?;
+                    }
+                    snapshot = next;
+                    snapshot.bitrate = rate.rate;
                     snapshot.source = resolved_source.clone(); snapshot.audio_source = resolved_audio.clone();
+                    snapshot.video_headers = resolved_video_headers.clone(); snapshot.audio_headers = resolved_audio_headers.clone();
                 }
                 Some(message) = outgoing.recv() => {
                     socket.send(WsMessage::Text(serde_json::to_string(&message).unwrap().into())).await.map_err(|_| "The watch service disconnected")?;
@@ -231,18 +346,35 @@ pub(super) async fn run(
                         last_state = Instant::now();
                     }
                     let ready = peers.values().filter(|p| p.connection.connection_state() == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Connected).count();
-                    let playing = !snapshot.state.paused && !snapshot.state.buffering && !peers.is_empty();
-                    if let Some(e) = &mut encoder && e.completed()? { encoder = None; }
+                    let loss = peers.values().map(|p| p.loss.swap(0, Ordering::Relaxed)).max().unwrap_or(0);
+                    let estimate = peers.values().map(|p| p.estimate.load(Ordering::Relaxed)).filter(|b| *b > 0).min().unwrap_or(0);
+                    if ready > 0 && rate.feedback(loss, estimate, video_bitrate(snapshot.width, snapshot.height), Instant::now()) {
+                        snapshot.bitrate = rate.rate;
+                        emit.send(Event::Status(format!("Streaming at original resolution · {:.1} Mbps upload", rate.rate as f64 / 1_000_000.0)));
+                    }
+                    let playing = !snapshot.state.paused && !snapshot.state.buffering && !viewers.is_empty() && ready > 0;
+                    if let Some(e) = &mut encoder {
+                        match e.completed().await {
+                            Ok(true) => encoder = None,
+                            Ok(false) => {},
+                            Err(_) if hls.fallback_to_software() => {
+                                encoder = None; preview_at = None;
+                                emit.send(Event::Status("Hardware encoding unavailable; using software encoding".into()));
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
                     let drifted = encoder.as_ref().is_some_and(|e| !e.preview && ((e.position + e.started.elapsed().as_secs_f64() * e.speed - snapshot.state.position).abs() > 1.25 || (e.speed - snapshot.state.speed).abs() > 0.001));
-                    if drifted || encoder.as_ref().is_some_and(|e| e.preview == playing) { encoder = None; }
+                    if let Some(e) = &mut encoder && e.bitrate != snapshot.bitrate { e.set_bitrate(snapshot.bitrate); }
+                    if drifted || encoder.as_ref().is_some_and(|e| e.width != snapshot.width || e.height != snapshot.height || e.preview == playing) { encoder = None; }
                     if playing {
                         preview_at = None;
-                        if encoder.is_none() { encoder = Some(Encoder::start(&ffmpeg, &snapshot, &tracks).await?); }
+                        if encoder.is_none() { encoder = Some(Encoder::start(&ffmpeg, &snapshot, &tracks, hls).await?); }
                     } else if snapshot.state.paused && !snapshot.state.buffering && snapshot.video && ready > 0
-                        && preview_at.is_none_or(|(position, count)| (position - snapshot.state.position).abs() > 0.1 || count != ready) {
+                        && preview_at.is_none_or(|(position, count)| (position - snapshot.state.position).abs() > 0.1 || count != viewers.len()) {
                         encoder = None;
-                        encoder = Some(Encoder::start(&ffmpeg, &snapshot, &tracks).await?);
-                        preview_at = Some((snapshot.state.position, ready));
+                        encoder = Some(Encoder::start(&ffmpeg, &snapshot, &tracks, hls).await?);
+                        preview_at = Some((snapshot.state.position, viewers.len()));
                     }
 
                 }
@@ -254,18 +386,30 @@ pub(super) async fn run(
                         WsMessage::Text(text) => {
                             let message: Message = serde_json::from_str(&text).map_err(|_| "The watch service sent an invalid message")?;
                             match message {
-                                Message::Created { url, ice_servers } if !created => { ice = ice_servers; created = true; emit.send(Event::Created(url)); }
-                                Message::PeerJoined { peer: id } if peers.len() < MAX_VIEWERS && !peers.contains_key(&id) => {
-                                    let viewer = peer(&id, &ice, &tracks, &snapshot, outbound.clone()).await?;
-                                    peers.insert(id, viewer); emit.send(Event::Viewers(peers.len()));
+                                Message::Created { url, ice_servers } if !created => {
+                                    outbound.send(Message::Uplink { bitrate: 0, queue_ms: 0 }).await.map_err(|_| "The watch service disconnected")?;
+                                    let publisher = peer("__publisher", &ice_servers, &tracks, &snapshot, outbound.clone()).await?;
+                                    peers.insert("__publisher".into(), publisher);
+                                    created = true; staged_url = Some(url);
                                 }
-                                Message::PeerLeft { peer } => { if let Some(p) = peers.remove(&peer) { p.close().await; } emit.send(Event::Viewers(peers.len())); }
+                                Message::PeerJoined { peer: id } if viewers.contains(&id) || viewers.len() < MAX_VIEWERS => {
+                                    preview_at = None;
+                                    viewers.insert(id); emit.send(Event::Viewers(viewers.len()));
+                                }
+                                Message::PeerLeft { peer } => { preview_at = None; viewers.remove(&peer); emit.send(Event::Viewers(viewers.len())); }
                                 Message::Answer { peer, sdp } => if let Some(viewer) = peers.get_mut(&peer) {
                                     let accepted = match RTCSessionDescription::answer(sdp) {
                                         Ok(answer) => viewer.connection.set_remote_description(answer).await.is_ok(),
                                         Err(_) => false,
                                     };
                                     if accepted {
+                                        for sender in viewer.connection.get_senders().await {
+                                            let parameters = sender.get_parameters().await;
+                                            if let Some(extension) = parameters.rtp_parameters.header_extensions.iter().find(|e| e.uri == webrtc::sdp::extmap::ABS_SEND_TIME_URI) {
+                                                tracks.send_time_extension.store(extension.id as u8, Ordering::Relaxed);
+                                            }
+                                        }
+                                        if peer == "__publisher" && let Some(url) = staged_url.take() { emit.send(Event::Created(url)); }
                                         for candidate in viewer.pending.drain(..) { let _ = viewer.connection.add_ice_candidate(candidate).await; }
                                     } else {
                                         // One failed/malformed viewer must not end everyone else's party.
@@ -279,6 +423,16 @@ pub(super) async fn run(
                                         if viewer.connection.remote_description().await.is_some() { let _ = viewer.connection.add_ice_candidate(candidate).await; }
                                         else if viewer.pending.len() < 64 { viewer.pending.push(candidate); }
                                 },
+                                Message::Uplink { bitrate, queue_ms } => {
+                                    if let Some(publisher) = peers.get("__publisher") {
+                                        // Packet loss alone misses a bloated network queue. Only
+                                        // constrain bitrate when delivery is falling behind RTP time.
+                                        if queue_ms > 120 {
+                                            publisher.loss.fetch_max(if queue_ms > 400 { 51 } else { 13 }, Ordering::Relaxed);
+                                            publisher.estimate.store(bitrate.saturating_mul(9) / 10, Ordering::Relaxed);
+                                        } else { publisher.estimate.store(0, Ordering::Relaxed); }
+                                    }
+                                }
                                 Message::Control { control } if control.valid() => emit.send(Event::Control(control)),
                                 Message::Error { message } => return Err(message),
                                 Message::Ended => break,
@@ -300,4 +454,20 @@ pub(super) async fn run(
     }
     let _ = tokio::time::timeout(Duration::from_secs(2), socket.close(None)).await;
     result
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    #[test]
+    fn source_headers_are_forwarded_without_header_injection() {
+        let metadata = serde_json::json!({"url":"https://media.example/video", "http_headers":{"User-Agent":"video-client", "Referer":"https://example.com/watch", "Bad\r\nHeader":"value", "Injected":"ok\r\nCookie: bad"}});
+        let headers = media_headers(&metadata, &metadata);
+        assert!(headers.contains("User-Agent: video-client\r\n"));
+        assert!(headers.contains("Referer: https://example.com/watch\r\n"));
+        assert!(!headers.contains("Injected"));
+        assert!(!headers.contains("Bad"));
+        assert!(media_url(&metadata).is_some());
+        assert!(media_url(&serde_json::json!({"url":"file:///etc/passwd"})).is_none());
+    }
 }

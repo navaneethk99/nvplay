@@ -7,10 +7,13 @@ services:
     restart: unless-stopped
     environment:
       NVPLAY_WATCH_PUBLIC_URL: https://${WATCH_DOMAIN:?Set WATCH_DOMAIN}
+      NVPLAY_SFU_PUBLIC_IP: ${WATCH_MEDIA_PUBLIC_IP:?Set WATCH_MEDIA_PUBLIC_IP to the public IPv4 address}
+      NVPLAY_WATCH_IDLE_SECONDS: ${WATCH_IDLE_SECONDS:-900}
       NVPLAY_WATCH_HOST_KEY: ${WATCH_HOST_KEY:?Set WATCH_HOST_KEY}
       NVPLAY_TURN_SECRET: ${TURN_SECRET:?Set TURN_SECRET}
       NVPLAY_TURN_URLS: turn:${TURN_DOMAIN:?Set TURN_DOMAIN}:3478?transport=udp,turn:${TURN_DOMAIN}:3478?transport=tcp
     expose: ["8787"]
+    ports: ["127.0.0.1:8787:8787", "50000:50000/udp"]
     security_opt: ["no-new-privileges:true"]
   caddy:
     image: caddy:2
@@ -42,7 +45,7 @@ services:
       - --max-port=49259
       - --user-quota=12
       - --total-quota=1200
-      - --max-bps=4000000
+      - --max-bps=16000000
       - --no-multicast-peers
       - --denied-peer-ip=0.0.0.0-0.255.255.255
       - --denied-peer-ip=10.0.0.0-10.255.255.255
