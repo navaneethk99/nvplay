@@ -204,6 +204,39 @@ deletes the original subtitle, restarts the player, and checks automatic
 selection and the restored font, colors, and stroke in mpv. It also accepts an
 HTTP media URL and needs no OpenSubtitles connection.
 
+### Watch history and resume
+
+Open the sidebar with **Ctrl/Cmd+L** and select **History**, or choose
+**View → History**. The last 100 watched videos appear with their saved playback
+time, most recent first. Click a movie to reopen it and resume from that time.
+Finished movies show **Watched · Play again** and restart from the beginning.
+Opening a file through the regular file picker or playlist starts it normally;
+the History entry provides the resume action.
+
+Playback positions update in memory every second, save to `history.json` in
+the app settings folder about every five seconds, and save immediately when
+stopping, switching videos, or exiting normally. History survives app restarts.
+Titles and original local paths or network URLs are retained. Cinejoy entries
+reopen the stable movie watch URL and resolve a fresh stream. Other expiring
+stream URLs may need to be opened again from their source; live or nonseekable
+streams cannot resume at an arbitrary timestamp.
+
+Use the × beside an entry to remove it, or **Clear history** to remove the list.
+Removing the active movie stops recording that viewing session until it is
+opened again. Missing or moved local videos stay listed with an explanatory
+error when selected; history never deletes your media files. Remembered
+subtitles and subtitle appearance also restore when using History.
+
+To exercise the complete restart-and-resume flow against libmpv:
+
+```sh
+NVPLAY_TEST_MEDIA='/path/to/movie.mp4' cargo test --locked real_history_resumes_from_saved_timestamp_after_restart -- --ignored
+```
+
+The test also accepts a seekable HTTP media URL. It saves a playback position,
+restarts with isolated settings, clicks the History entry, and verifies that
+playback resumes at the saved time.
+
 ## Included
 
 - Embedded video with aspect-ratio preservation and engine-managed subtitles.
@@ -247,9 +280,9 @@ src/playback/properties.rs  Track and audio-device property decoding
 
 Keep future features behind the playback layer rather than adding native API calls to the UI. The engine uses asynchronous commands and observed properties. Engine events and new-video-frame callbacks wake the UI immediately. Active video also repaints continuously at eframe’s vsync cadence; paused/idle playback stays event-driven. The engine uses `video-sync=audio` and `video-timing-offset=0`, so its nonblocking render callback receives frames at their due time instead of presenting them ahead of the audio clock. All render calls stay on the GL thread. Only new frames or surface resizes invoke mpv's renderer; hover and menu repaints reuse the existing video texture. A separate framebuffer and clipping preserve the surrounding controls. The render context and callbacks are released before the window's OpenGL context or engine handle.
 
-Mute, selected tracks, volume, duration, position, seekability, buffering, and audio output all come from engine properties. A seek/volume preview lasts only until the engine acknowledges it or a short timeout expires. Audio metadata is refreshed asynchronously after decoder reconfiguration. Native file pickers use non-blocking futures polled on the UI thread. **View → Playback information** shows current engine state, audio format/output, and render statistics for troubleshooting.
+Selected tracks, volume, duration, position, seekability, buffering, and audio output come from engine properties. Mute controls display the latest requested state immediately while a direct asynchronous native property update confirms it; rapid toggles retain the last choice, and failures restore the observed engine state. The mute button dispatches on mouse-down. On macOS CoreAudio and AVFoundation, mute also gates the app’s own output renderer to zero so buffered output is silenced there; unmuting restores the saved renderer gain. This gate does not change system volume and is not applied to backends that expose a system-wide mixer. A seek/volume preview lasts only until the engine acknowledges it or a short timeout expires. Audio metadata is refreshed asynchronously after decoder reconfiguration. Native file pickers use non-blocking futures polled on the UI thread. **View → Playback information** shows current engine state, audio format/output, and render statistics for troubleshooting.
 
-Useful next milestones: persistent settings and recent files, frame stepping and screenshots, playlist import/export, platform-specific packaging, and signed installers. The queue is currently in memory; OpenSubtitles credentials, subtitle associations, subtitle appearance, and updater preferences persist locally. HDR passthrough, disc menus, casting, and a plugin system are not implemented. On macOS the OpenGL player prefers VideoToolbox copy-back hardware decoding, with mpv auto/software fallback. Other platforms use mpv’s `auto-safe` policy. This does not guarantee zero-copy decoding.
+Useful next milestones: persistent settings and recent files, frame stepping and screenshots, playlist import/export, platform-specific packaging, and signed installers. The queue is currently in memory; OpenSubtitles credentials, subtitle associations, subtitle appearance, watch history, and updater preferences persist locally. HDR passthrough, disc menus, casting, and a plugin system are not implemented. On macOS the OpenGL player prefers VideoToolbox copy-back hardware decoding, with mpv auto/software fallback. Other platforms use mpv’s `auto-safe` policy. This does not guarantee zero-copy decoding.
 
 ## Validate
 

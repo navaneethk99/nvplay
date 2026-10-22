@@ -1,3 +1,5 @@
+mod audio;
+mod history_panel;
 mod icons;
 mod movie_search;
 #[cfg(target_os = "macos")]
@@ -27,6 +29,13 @@ use std::{
 
 const ACCENT: Color32 = Color32::from_rgb(217, 132, 34);
 const BAR_BACKGROUND: Color32 = Color32::from_rgb(29, 29, 29);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SidebarTab {
+    Playlist,
+    Subtitles,
+    History,
+}
 
 #[derive(Clone)]
 struct Media {
@@ -76,7 +85,8 @@ pub struct PlayerApp {
     playback_generation: u64,
     downloaded_subtitles: Vec<crate::subtitles::Downloaded>,
     subtitle_preferences: subtitle_controls::Preferences,
-    sidebar_subtitles: bool,
+    sidebar_tab: SidebarTab,
+    watch_history: history_panel::WatchHistory,
     url: String,
     fullscreen: bool,
     repeat: bool,
@@ -96,6 +106,7 @@ pub struct PlayerApp {
     volume_preview: Option<f64>,
     pending_seek: Option<(f64, Instant)>,
     pending_volume: Option<(f64, Instant)>,
+    mute_control: audio::MuteControl,
     chrome_until: Instant,
     fullscreen_request: Option<Instant>,
     show_info: bool,
@@ -165,7 +176,8 @@ impl PlayerApp {
             playback_generation: 0,
             downloaded_subtitles: Vec::new(),
             subtitle_preferences: subtitle_controls::Preferences::default(),
-            sidebar_subtitles: false,
+            sidebar_tab: SidebarTab::Playlist,
+            watch_history: history_panel::WatchHistory::default(),
             url: String::new(),
             fullscreen: false,
             repeat: false,
@@ -185,6 +197,7 @@ impl PlayerApp {
             volume_preview: None,
             pending_seek: None,
             pending_volume: None,
+            mute_control: audio::MuteControl::default(),
             chrome_until: Instant::now(),
             fullscreen_request: None,
             show_info: false,
@@ -221,6 +234,10 @@ impl PlayerApp {
         }
     }
     fn play(&mut self, index: usize) {
+        if self.player.is_some() && self.queue.get(index).is_some() {
+            self.checkpoint_history();
+            self.watch_history.flush();
+        }
         if let (Some(media), Some(player)) = (self.queue.get(index), self.player.as_mut()) {
             match player.load(&media.source) {
                 Ok(()) => {
@@ -232,6 +249,8 @@ impl PlayerApp {
                     self.playback_generation = self.playback_generation.wrapping_add(1);
                     self.subtitle_search.close();
                     self.subtitle_preferences.cancel_pending();
+                    self.watch_history.cancel_session();
+                    self.pending_seek = None;
                     self.current = Some(index);
                     self.error = None;
                     self.seek_preview = None;
@@ -440,7 +459,7 @@ impl PlayerApp {
                     1 => self.command(&["seek", "-5", "relative+exact"]),
                     2 => self.command(&["seek", "5", "relative+exact"]),
                     3 => self.toggle_fullscreen(ctx),
-                    4 => self.command(&["cycle", "mute"]),
+                    4 => self.toggle_mute(),
                     5 | 6 => {
                         let volume =
                             self.pending_volume
@@ -459,6 +478,9 @@ impl PlayerApp {
     }
 
     fn stop(&mut self) {
+        self.checkpoint_history();
+        self.watch_history.flush();
+        self.watch_history.cancel_session();
         self.playback_generation = self.playback_generation.wrapping_add(1);
         self.subtitle_search.close();
         self.subtitle_preferences.cancel_pending();
@@ -568,9 +590,9 @@ impl PlayerApp {
                         }
                     }
                 });
-                let mut muted = self.player.as_ref().is_some_and(|p| p.state.muted);
+                let mut muted = self.is_muted();
                 if ui.checkbox(&mut muted, "Mute").changed() {
-                    self.command(&["set", "mute", if muted { "yes" } else { "no" }]);
+                    self.set_muted(muted);
                 }
             });
             ui.menu_button("Video", |ui| {
@@ -605,6 +627,10 @@ impl PlayerApp {
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut self.show_playlist, "Playlist");
                 ui.checkbox(&mut self.show_info, "Playback information");
+                if ui.button("History").clicked() {
+                    self.open_history();
+                    ui.close();
+                }
             });
             ui.menu_button("Help", |ui| {
                 if ui.button("Keyboard shortcuts").clicked() {
@@ -637,10 +663,10 @@ impl PlayerApp {
                     });
                 }
                 ui.horizontal(|ui| {
-                    ui.strong(if self.sidebar_subtitles {
-                        "Subtitles".into()
-                    } else {
-                        format!("Playlist ({})", self.queue.len())
+                    ui.strong(match self.sidebar_tab {
+                        SidebarTab::Playlist => format!("Playlist ({})", self.queue.len()),
+                        SidebarTab::Subtitles => "Subtitles".into(),
+                        SidebarTab::History => "History".into(),
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icons::small_button(ui, Icon::Close, "Close playlist sidebar").clicked()
@@ -650,12 +676,17 @@ impl PlayerApp {
                     });
                 });
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.sidebar_subtitles, false, "Playlist");
-                    ui.selectable_value(&mut self.sidebar_subtitles, true, "Subtitles");
+                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Playlist, "Playlist");
+                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Subtitles, "Subtitles");
+                    ui.selectable_value(&mut self.sidebar_tab, SidebarTab::History, "History");
                 });
                 ui.separator();
-                if self.sidebar_subtitles {
+                if self.sidebar_tab == SidebarTab::Subtitles {
                     self.subtitle_controls(ui);
+                    return;
+                }
+                if self.sidebar_tab == SidebarTab::History {
+                    self.history_panel(ui);
                     return;
                 }
                 if ui
@@ -972,6 +1003,7 @@ impl PlayerApp {
                 )
             })
             .unwrap_or((0.0, 0.0, true, 100.0, true, false, false, false));
+        let muted = self.mute_control.display(muted);
         let display_position = self
             .seek_preview
             .or(self.pending_seek.map(|p| p.0))
@@ -1210,7 +1242,7 @@ impl PlayerApp {
                 }
                 if response.changed() {
                     if muted {
-                        self.command(&["set", "mute", "no"]);
+                        self.set_muted(false);
                     }
                     self.volume_preview = Some(volume);
                     self.set_volume(volume);
@@ -1236,8 +1268,8 @@ impl PlayerApp {
                 {
                     self.control_rects.mute = Some(mute.rect);
                 }
-                if mute.clicked() {
-                    self.command(&["cycle", "mute"]);
+                if Self::mute_button_pressed(&mute, ui) {
+                    self.toggle_mute();
                 }
                 if self.loading || buffering {
                     ui.spinner();
@@ -1539,6 +1571,14 @@ impl PlayerApp {
                         state.audio_channels
                     ));
                     ui.label(format!(
+                        "Audio output: {}",
+                        if state.audio_output.is_empty() {
+                            "not active"
+                        } else {
+                            &state.audio_output
+                        }
+                    ));
+                    ui.label(format!(
                         "Volume: {:.0}%{}",
                         state.volume,
                         if state.muted { " (muted)" } else { "" }
@@ -1605,18 +1645,26 @@ impl PlayerApp {
     fn handle_playback_event(&mut self, event: PlaybackEvent) {
         match event {
             PlaybackEvent::Finished => {
+                self.history_finished();
                 self.loading = false;
                 self.next();
             }
             PlaybackEvent::Error(error) => {
+                self.checkpoint_history();
+                self.watch_history.flush();
+                if self.loading {
+                    self.watch_history.cancel_session();
+                }
                 self.error = Some(error);
                 self.loading = false;
             }
             PlaybackEvent::Loaded => {
                 self.loading = false;
                 self.restore_subtitle();
+                self.history_loaded();
             }
             PlaybackEvent::SubtitleAdded { id, result } => self.subtitle_added(id, result),
+            PlaybackEvent::MuteApplied { id, result } => self.mute_applied(id, result),
         }
     }
 
@@ -1656,7 +1704,9 @@ impl PlayerApp {
         for event in events {
             self.handle_playback_event(event);
         }
+        self.poll_mute(ctx);
         self.subtitle_preferences.poll(ctx);
+        self.poll_history();
         let drops = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -1845,6 +1895,8 @@ impl eframe::App for PlayerApp {
         self.ui(ctx);
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.checkpoint_history();
+        self.watch_history.flush();
         self.subtitle_preferences.flush();
         // Free mpv and our FBO before eframe destroys the current GL context.
         self.renderer.lock().unwrap().take();

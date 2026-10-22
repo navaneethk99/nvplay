@@ -1,6 +1,8 @@
 mod app;
+mod history;
 mod open_documents;
 mod playback;
+mod settings;
 #[cfg(target_os = "macos")]
 mod source_version;
 mod streaming;

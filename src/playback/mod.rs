@@ -1,4 +1,5 @@
 mod ffi;
+mod output_gate;
 mod properties;
 mod render;
 pub use properties::{AudioDevice, Track};
@@ -32,6 +33,7 @@ pub struct PlaybackState {
     pub tracks: Vec<Track>,
     pub audio_devices: Vec<AudioDevice>,
     pub audio_device: String,
+    pub audio_output: String,
     pub audio_track: String,
     pub subtitle_track: String,
     pub audio_codec: String,
@@ -51,6 +53,7 @@ pub enum PlaybackEvent {
     Error(String),
     Loaded,
     SubtitleAdded { id: u64, result: Result<(), String> },
+    MuteApplied { id: u64, result: Result<(), String> },
 }
 
 pub struct Player {
@@ -63,6 +66,9 @@ pub struct Player {
     cinejoy_resolver: Option<streaming::cinejoy::Resolver>,
     cinejoy_playlist: Option<streaming::cinejoy::Playlist>,
     pub stream_quality: streaming::Quality,
+    mute_request: u64,
+    mute_desired: Option<bool>,
+    output_gate: output_gate::OutputGate,
 }
 
 struct Client {
@@ -215,6 +221,8 @@ impl Player {
             ("track-list", 6),
             ("audio-device-list", 6),
             ("audio-device", 1),
+            ("current-ao", 1),
+            ("ao-volume", 5),
             ("aid", 1),
             ("sid", 1),
             ("audio-codec-name", 1),
@@ -259,6 +267,9 @@ impl Player {
             cinejoy_resolver: None,
             cinejoy_playlist: None,
             stream_quality: streaming::Quality::default(),
+            mute_request: 0,
+            mute_desired: None,
+            output_gate: output_gate::OutputGate::default(),
             state: PlaybackState {
                 volume: 100.0,
                 speed: 1.0,
@@ -271,11 +282,61 @@ impl Player {
     /// Commands are asynchronous so slow network input cannot block the UI or
     /// deadlock against mpv's render thread. Completion errors arrive via poll.
     pub fn command(&mut self, arguments: &[&str]) -> Result<(), String> {
+        if matches!(arguments, ["set", "mute", _] | ["cycle", "mute"]) {
+            self.mute_desired = None;
+        }
         if arguments.first() == Some(&"stop") {
             self.cinejoy_resolver = None;
             self.pending_load_error = None;
         }
         self.command_tagged(arguments, u64::from(arguments.first() == Some(&"loadfile")))
+    }
+
+    /// Send an explicit native flag update; never wait for the audio core on the UI thread.
+    pub fn set_muted(&mut self, muted: bool) -> Result<u64, String> {
+        let id = (self.mute_request.wrapping_add(1) & !(1 << 63)).max(1);
+        if muted {
+            self.apply_output_gate(true);
+        }
+        let mut flag = i32::from(muted);
+        // SAFETY: mute is a flag (MPV_FORMAT_FLAG = 3). mpv copies the value
+        // before returning and reports completion in SET_PROPERTY_REPLY.
+        self.client.api.check(unsafe {
+            (self.client.api.set_property_async)(
+                self.client.handle,
+                id,
+                c"mute".as_ptr(),
+                3,
+                (&mut flag as *mut i32).cast(),
+            )
+        })?;
+        self.mute_request = id;
+        self.mute_desired = Some(muted);
+        if !muted {
+            self.apply_output_gate(false);
+        }
+        Ok(id)
+    }
+
+    fn apply_output_gate(&mut self, muted: bool) {
+        // Other platforms/backends can expose system-wide mixers through
+        // ao-volume. Limit this gate to the two known per-app macOS renderers.
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        if let Some((id, mut gain)) = self.output_gate.request(muted) {
+            // SAFETY: MPV_FORMAT_DOUBLE = 5; mpv copies this stack value.
+            let result = unsafe {
+                (self.client.api.set_property_async)(
+                    self.client.handle,
+                    id,
+                    c"ao-volume".as_ptr(),
+                    5,
+                    (&mut gain as *mut f64).cast(),
+                )
+            };
+            self.output_gate.replied(id, result >= 0);
+        }
     }
 
     /// The reply identifies whether this particular subtitle was accepted.
@@ -381,6 +442,19 @@ impl Player {
                         }
                     }
                 }
+                4 if output_gate::OutputGate::is_reply(event.userdata) => {
+                    self.output_gate.replied(event.userdata, event.error >= 0);
+                }
+                4 => {
+                    if event.error < 0 && event.userdata == self.mute_request {
+                        self.mute_desired = None;
+                        self.apply_output_gate(self.state.muted);
+                    }
+                    events.push(PlaybackEvent::MuteApplied {
+                        id: event.userdata,
+                        result: self.client.api.check(event.error),
+                    });
+                }
                 5 if event.userdata >= 2 => {
                     events.push(PlaybackEvent::SubtitleAdded {
                         id: event.userdata,
@@ -413,6 +487,7 @@ impl Player {
                 }
                 8 => events.push(PlaybackEvent::Loaded),
                 18 => {
+                    self.output_gate.reconfigured();
                     // A decoder/output rebuild can temporarily invalidate audio
                     // properties. Refresh after reconfiguration without waiting
                     // synchronously on the core from the render/UI thread.
@@ -502,6 +577,9 @@ impl Player {
                             self.state.duration = unsafe { *prop.data.cast::<f64>() }
                         }
                         (b"volume", 5) => self.state.volume = unsafe { *prop.data.cast::<f64>() },
+                        (b"ao-volume", 5) => {
+                            self.output_gate.gain(unsafe { *prop.data.cast::<f64>() })
+                        }
                         (b"speed", 5) => self.state.speed = unsafe { *prop.data.cast::<f64>() },
                         (b"pause", 3) => {
                             self.state.paused = unsafe { *prop.data.cast::<i32>() != 0 }
@@ -546,7 +624,7 @@ impl Player {
                             self.state.audio_channels = unsafe { *prop.data.cast::<i64>() }
                         }
                         (
-                            b"audio-device" | b"aid" | b"sid" | b"audio-codec-name"
+                            b"current-ao" | b"audio-device" | b"aid" | b"sid" | b"audio-codec-name"
                             | b"hwdec-current" | b"video-codec",
                             1,
                         ) => {
@@ -559,6 +637,10 @@ impl Player {
                                     .into_owned()
                             };
                             match name {
+                                b"current-ao" => {
+                                    self.output_gate.backend(&value);
+                                    self.state.audio_output = value;
+                                }
                                 b"audio-device" => self.state.audio_device = value,
                                 b"aid" => self.state.audio_track = value,
                                 b"sid" => self.state.subtitle_track = value,
@@ -581,6 +663,7 @@ impl Player {
                 _ => {}
             }
         }
+        self.apply_output_gate(self.mute_desired.unwrap_or(self.state.muted));
         if let Some(resolver) = &mut self.cinejoy_resolver {
             if let Some(result) = resolver.poll() {
                 self.cinejoy_resolver = None;

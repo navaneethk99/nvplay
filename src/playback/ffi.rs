@@ -110,6 +110,7 @@ api! {
     terminate_destroy: unsafe extern "C" fn(*mut c_void),
     set_option_string: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> c_int,
     command_async: unsafe extern "C" fn(*mut c_void, u64, *const *const c_char) -> c_int,
+    set_property_async: unsafe extern "C" fn(*mut c_void, u64, *const c_char, c_int, *mut c_void) -> c_int,
     observe_property: unsafe extern "C" fn(*mut c_void, u64, *const c_char, c_int) -> c_int,
     #[cfg(test)]
     get_property_string: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,

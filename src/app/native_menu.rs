@@ -15,6 +15,7 @@ enum Action {
     Network,
     SearchMovies,
     Pause,
+    Mute,
     Stop,
     Previous,
     Next,
@@ -24,6 +25,7 @@ enum Action {
     DownloadSubtitle,
     SubtitleAppearance,
     Playlist,
+    History,
     Info,
     Help,
     Quit,
@@ -311,6 +313,7 @@ impl PlayerApp {
             Action::Network => self.show_url = true,
             Action::SearchMovies => self.open_movie_search(),
             Action::Pause => self.toggle_pause(),
+            Action::Mute => self.toggle_mute(),
             Action::Stop => self.stop(),
             Action::Previous => self.previous(),
             Action::Next => self.next(),
@@ -320,6 +323,7 @@ impl PlayerApp {
             Action::DownloadSubtitle => self.open_subtitle_search(),
             Action::SubtitleAppearance => self.open_subtitle_controls(),
             Action::Playlist => self.show_playlist = !self.show_playlist,
+            Action::History => self.open_history(),
             Action::Info => self.show_info = !self.show_info,
             Action::Help => self.show_help = true,
             Action::Quit => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -410,8 +414,8 @@ impl PlayerApp {
             vec![
                 Entry::submenu("Audio Track", tracks("audio", "aid")),
                 Entry::submenu("Audio Device", devices),
-                Entry::command("Mute", &["cycle", "mute"])
-                    .checked(state.is_some_and(|s| s.muted))
+                Entry::item("Mute", Mute)
+                    .checked(self.is_muted())
                     .enabled(available),
             ],
             vec![
@@ -439,6 +443,8 @@ impl PlayerApp {
                     .key("l")
                     .checked(self.show_playlist),
                 Entry::item("Playback information", Info).checked(self.show_info),
+                Entry::item("History", History)
+                    .checked(self.show_playlist && self.sidebar_tab == super::SidebarTab::History),
             ],
             vec![
                 Entry::item("Keyboard shortcuts", Help),

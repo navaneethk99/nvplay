@@ -61,7 +61,7 @@ impl Preferences {
 impl super::PlayerApp {
     pub(super) fn open_subtitle_controls(&mut self) {
         self.show_playlist = true;
-        self.sidebar_subtitles = true;
+        self.sidebar_tab = super::SidebarTab::Subtitles;
     }
     pub(super) fn add_subtitle(&mut self, path: PathBuf) {
         if self.loading || self.player.as_ref().is_none_or(|p| p.state.idle) {
@@ -322,7 +322,7 @@ mod tests {
         app.open_subtitle_controls();
         frame(&mut app, &ctx, vec![]);
         let output = frame(&mut app, &ctx, vec![]);
-        assert!(app.show_playlist && app.sidebar_subtitles);
+        assert!(app.show_playlist && app.sidebar_tab == super::super::SidebarTab::Subtitles);
         let bold = button(&output, "Bold");
         assert!(bold.x < 300.0 && bold.y < 500.0);
         click(&mut app, &ctx, bold);
