@@ -202,7 +202,7 @@ impl super::PlayerApp {
             .poll(ui.ctx(), &mut self.watch_history.store);
         ui.small("Recently watched · choose an item to continue");
         if let Some(error) = &self.watch_history.error {
-            ui.colored_label(super::ACCENT, error);
+            ui.colored_label(ui.visuals().selection.stroke.color, error);
         }
         let has_history = !self.watch_history.store.entries().is_empty();
         let footer_height = if has_history {
@@ -353,7 +353,11 @@ impl super::PlayerApp {
                                                 egui::pos2(left, rect.bottom() - 5.0),
                                                 egui::vec2(text_width * progress, 2.0),
                                             );
-                                            ui.painter().rect_filled(bar, 1.0, super::ACCENT);
+                                            ui.painter().rect_filled(
+                                                bar,
+                                                1.0,
+                                                ui.visuals().selection.stroke.color,
+                                            );
                                         }
                                     }
                                     if response.on_hover_text(&entry.source).clicked() {

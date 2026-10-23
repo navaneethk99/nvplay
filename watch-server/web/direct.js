@@ -12,12 +12,17 @@ function loadScript(src) {
   });
 }
 class BrowserPlayback {
-  constructor(media, video, onReady, onError, onAutoplay) {
-    Object.assign(this, {media, video, onReady, onError, onAutoplay});
+  constructor(media, video, onReady, onError, onAutoplay, onFallback = () => {}) {
+    Object.assign(this, {media, video, onReady, onError, onAutoplay, onFallback});
     this.ready = false; this.disposed = false; this.failed = false;
   }
   fail(message) {
-    if (this.disposed || this.failed) return;
+    if (this.disposed || this.failed || this.switching) return;
+    if (this.media.fallback_url && !this.usingProxy) {
+      this.usingProxy = true;
+      this.startFallback().catch(error => this.fail(error.message));
+      return;
+    }
     this.failed = true; this.pause(); this.hls?.stopLoad(); this.onError(message);
   }
   async start() {
@@ -57,18 +62,38 @@ class BrowserPlayback {
         this.blob = URL.createObjectURL(new Blob([this.media.playlist], {type: 'application/vnd.apple.mpegurl'}));
         url = this.blob;
       }
-      if (isHls && !this.video.canPlayType('application/vnd.apple.mpegurl')) {
-        hlsAPI ||= loadScript('/hls.js');
-        await hlsAPI;
-        if (this.disposed) return;
-        if (!Hls.isSupported()) throw Error('This browser does not support HLS playback.');
-        this.hls = new Hls({enableWorker: false});
-        this.hls.on(Hls.Events.ERROR, (_, data) => {
-          if (data.fatal) this.fail('Could not load the movie stream. The provider may block browser access (CORS), or the media link may have expired.');
-        });
-        this.hls.loadSource(url); this.hls.attachMedia(this.video);
-      } else this.video.src = url;
+      if (isHls) await this.loadHls(url);
+      else this.video.src = url;
     } catch (error) { this.fail(error.message); }
+  }
+  async loadHls(url) {
+    // Prefer MSE even when a Chromium browser advertises native HLS. Native
+    // support alone does not establish that it can open a blob master playlist.
+    hlsAPI ||= loadScript('/hls.js');
+    await hlsAPI;
+    if (this.disposed) return;
+    if (Hls.isSupported()) {
+      const hls = new Hls({enableWorker: false});
+      this.hls = hls;
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (this.hls === hls && data.fatal) {
+          this.lastError = {type: data.type, details: data.details, status: data.response?.code};
+          this.fail(`Could not load the movie stream (${data.details || data.type}). The provider may block browser access or the media link may have expired.`);
+        }
+      });
+      hls.loadSource(url); hls.attachMedia(this.video);
+    } else if (this.video.canPlayType('application/vnd.apple.mpegurl')) this.video.src = url;
+    else throw Error('This browser does not support HLS playback.');
+  }
+  async startFallback() {
+    this.switching = true; this.ready = false; this.hasFrame = false;
+    clearTimeout(this.loadTimer);
+    this.hls?.destroy(); this.hls = undefined;
+    this.video.removeAttribute('src'); this.video.load();
+    this.onFallback();
+    this.switching = false;
+    this.loadTimer = setTimeout(() => { if (!this.hasFrame) this.fail('The movie could not load through the watch service. Try a fresh movie source or stream from the host device.'); }, 30000);
+    await this.loadHls(this.media.fallback_url);
   }
   pause() {
     if (this.youtube) { if (this.ready) this.youtube.pauseVideo(); }

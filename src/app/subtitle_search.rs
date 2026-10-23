@@ -1,5 +1,5 @@
 use crate::subtitles::{self, Downloaded, Subtitle};
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, RichText};
 use std::sync::mpsc::{self, Receiver};
 
 enum Reply {
@@ -173,7 +173,7 @@ impl SubtitleSearch {
                     });
                 });
                 if busy { ui.horizontal(|ui| { ui.spinner(); ui.label(if self.downloading { "Downloading subtitle…" } else { "Searching OpenSubtitles…" }); }); }
-                if let Some(error) = &self.error { ui.colored_label(Color32::from_rgb(240, 100, 85), error); }
+                if let Some(error) = &self.error { ui.colored_label(ui.visuals().error_fg_color, error); }
                 if self.searched && self.results.is_empty() { ui.label("No subtitles found. Try another title or language."); }
                 if !ready { ui.label("Open a video and wait for it to finish loading to download subtitles."); }
                 for subtitle in &self.results {

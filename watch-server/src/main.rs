@@ -1,3 +1,5 @@
+mod social;
+mod media_proxy;
 mod relay;
 use axum::{
     Json, Router,
@@ -26,10 +28,13 @@ use watch_protocol::{Access, IceServer, MAX_MESSAGE, MAX_VIEWERS, Message, Playb
 
 type Tx = mpsc::Sender<Message>;
 struct Viewer {
+    name: String,
     tx: Tx,
     media: Option<relay::Connection>,
 }
 struct Room {
+    chat: social::ChatHistory,
+    media_assets: HashMap<String, String>,
     media: Option<watch_protocol::Media>,
     token: String,
     relay: Option<relay::Relay>,
@@ -160,6 +165,8 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
             rooms.insert(
                 room_id.clone(),
                 Room {
+                    chat: social::ChatHistory::default(),
+                    media_assets: HashMap::new(),
                     media,
                     token,
                     relay: None,
@@ -180,7 +187,12 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
             room,
             token,
             client_offers,
+            name,
         } => {
+            let name = match watch_protocol::display_name(&name) {
+                Ok(name) => name,
+                Err(error) => { reject(&mut socket, error).await; return; }
+            };
             let mut rooms = service.rooms.lock().await;
             let Some(session) = rooms
                 .get_mut(&room)
@@ -205,17 +217,22 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
                 return;
             }
             let peer = secret();
-            if session
-                .host
-                .try_send(Message::PeerJoined { peer: peer.clone() })
-                .is_err()
-            {
+            if session.host.is_closed() {
                 drop(rooms);
                 reject(&mut socket, "The host is unavailable").await;
                 return;
             }
             let client_offers = client_offers && session.relay.is_some();
+            let mut participants = session.participants();
+            participants.push(watch_protocol::Participant { peer: peer.clone(), name: name.clone(), host: false });
             let _ = tx.try_send(Message::Joined {
+                participants,
+                history: session.chat.snapshot(),
+                media_proxy: matches!(
+                    session.media,
+                    Some(watch_protocol::Media::HlsPlaylist { .. })
+                )
+                .then(|| format!("/media/{room}/master?token={}", session.token)),
                 media: session.media.clone(),
                 peer: peer.clone(),
                 client_offers,
@@ -249,10 +266,12 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
             session.viewers.insert(
                 peer.clone(),
                 Viewer {
+                    name: name.clone(),
                     tx: tx.clone(),
                     media,
                 },
             );
+            session.broadcast(Message::PeerJoined { peer: peer.clone(), name });
             (room, Some(peer))
         }
         _ => {
@@ -265,6 +284,7 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
     let mut last_seen = Instant::now();
     let started = Instant::now();
     let mut budget = (Instant::now(), 0_u32);
+    let mut chat_budget = social::ChatRate::default();
     loop {
         tokio::select! {
             message = rx.recv() => {
@@ -291,6 +311,14 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
                 let mut rooms = service.rooms.lock().await;
                 let Some(room) = rooms.get_mut(&room_id) else { break; };
                 match (&peer_id, message) {
+                    (_, Message::ChatSend { text }) => {
+                        let result = if chat_budget.accept() { room.chat_message(peer_id.as_deref(), &text) }
+                            else { Err("Please slow down. You can send another message in a moment.") };
+                        match result {
+                            Ok(message) => room.broadcast(message),
+                            Err(message) => { let _ = tx.try_send(Message::ChatRejected { message: message.into() }); }
+                        }
+                    }
                     (None, Message::State { state }) if state.valid() => {
                         room.state = Some(state.clone());
                         for viewer in room.viewers.values() { let _ = viewer.tx.try_send(Message::State { state: state.clone() }); }
@@ -317,6 +345,7 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
                     (None, Message::PeerLeft { peer }) => {
                         if let Some(viewer) = room.viewers.remove(&peer) {
                             let _ = viewer.tx.try_send(Message::Error { message: "Your video connection could not be established. Reopen the link to try again.".into() });
+                            room.broadcast(Message::PeerLeft { peer });
                         }
                     }
                     (None, Message::Access { access }) => {
@@ -357,12 +386,10 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
     let mut rooms = service.rooms.lock().await;
     if let Some(peer) = peer_id {
         if let Some(room) = rooms.get_mut(&room_id) {
-            if let Some(viewer) = room.viewers.remove(&peer)
-                && let Some(media) = viewer.media
-            {
-                media.close().await;
+            if let Some(viewer) = room.viewers.remove(&peer) {
+                room.broadcast(Message::PeerLeft { peer });
+                if let Some(media) = viewer.media { media.close().await; }
             }
-            let _ = room.host.try_send(Message::PeerLeft { peer });
         }
     } else if let Some(room) = rooms.remove(&room_id) {
         if rooms.is_empty() {
@@ -421,6 +448,7 @@ fn app(service: Arc<Service>) -> Router {
         .route("/direct.js", get(|| async { ([("content-type", "text/javascript; charset=utf-8")], include_str!("../web/direct.js")) }))
         .route("/hls.js", get(|| async { ([("content-type", "text/javascript; charset=utf-8")], include_str!("../web/vendor/hls-1.6.16.min.js")) }))
         .route("/viewer.js", get(|| async { ([("content-type", "text/javascript; charset=utf-8")], include_str!("../web/viewer.js")) }))
+        .route("/media/{room}/{asset}", get(media_proxy::serve))
         .route("/ws", get(socket))
         .layer(axum::middleware::from_fn(|request: axum::extract::Request, next: axum::middleware::Next| async move {
             let mut response = next.run(request).await;
@@ -428,7 +456,7 @@ fn app(service: Arc<Service>) -> Router {
                 ("referrer-policy", "strict-origin-when-cross-origin"),
                 ("cache-control", "no-store"),
                 ("x-content-type-options", "nosniff"),
-                ("content-security-policy", "default-src 'self'; script-src 'self' https://www.youtube.com https://s.ytimg.com; style-src 'unsafe-inline'; connect-src 'self' https: http:; media-src 'self' blob: https: http:; frame-src https://www.youtube.com; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'"),
+                ("content-security-policy", "default-src 'self'; script-src 'self' https://www.youtube.com https://s.ytimg.com; style-src 'unsafe-inline'; connect-src 'self' blob: https: http:; media-src 'self' blob: https: http:; frame-src https://www.youtube.com; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'"),
             ] { response.headers_mut().insert(axum::http::HeaderName::from_static(key), value.parse().unwrap()); }
             response
         }))
@@ -532,6 +560,8 @@ mod tests {
         service.rooms.lock().await.insert(
             "room".into(),
             Room {
+                    chat: social::ChatHistory::default(),
+                media_assets: HashMap::new(),
                 media: None,
                 token: secret(),
                 relay: None,
@@ -687,6 +717,7 @@ mod tests {
         send(
             &mut bad,
             Message::Join {
+                name: "Test viewer".into(),
                 client_offers: false,
                 room: room.clone(),
                 token: "wrong".into(),
@@ -701,6 +732,7 @@ mod tests {
             send(
                 &mut viewer,
                 Message::Join {
+                name: "Test viewer".into(),
                     client_offers: false,
                     room: room.clone(),
                     token: token.clone(),
@@ -773,6 +805,7 @@ mod tests {
         send(
             &mut locked,
             Message::Join {
+                name: "Test viewer".into(),
                 client_offers: false,
                 room: room.clone(),
                 token: token.clone(),
@@ -866,6 +899,7 @@ mod tests {
         send(
             &mut expired,
             Message::Join {
+                name: "Test viewer".into(),
                 room,
                 token,
                 client_offers: false,

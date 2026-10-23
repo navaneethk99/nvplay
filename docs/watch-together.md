@@ -9,7 +9,7 @@ now use a control-only session; local files retain the encoder/relay session.
 | --- | --- |
 | YouTube watch, short, embed, live URL | YouTube IFrame Player API with video ID |
 | Recognized MP4/M4V, WebM, audio URL | Browser media element |
-| HLS URL | Native HLS, or locally vendored hls.js |
+| HLS URL | Locally vendored hls.js (MSE), native HLS fallback |
 | Cinejoy | The already resolved master playlist, with absolute video/audio URLs |
 | Local file, other website extractor, other container/DASH | Existing FFmpeg → WebRTC relay |
 | “Stream from my device instead” selected | Existing FFmpeg → WebRTC relay |
@@ -30,8 +30,9 @@ as before. There is no automatic mid-session switch to broadcasting.
    members, and ends the room on shutdown. It does not resolve YouTube streams,
    discover FFmpeg encoders, create WebRTC tracks, or download media.
 4. The viewer creates a provider player and fetches media directly. No peer
-   connection is created for this mode. The watch server never proxies or fetches
-   the supplied media URL.
+   connection is created for this mode. Inline HLS sessions also receive a
+   `Joined.media_proxy` URL. If direct playback fails, the viewer retries once
+   through the authenticated original-byte HLS fallback.
 5. Browser controls send `Control` to the server. Server permissions and desktop
    permissions are enforced before mpv receives a command. All viewers follow
    the subsequent authoritative host state, avoiding control feedback loops.
@@ -49,10 +50,23 @@ as before. There is no automatic mid-session switch to broadcasting.
 
 Autoplay rejection presents an explicit enable-playback gesture. Loading and
 fatal errors show an explanation instead of repeatedly reconnecting the session.
-HLS must permit cross-origin manifest, segment, and key requests. Resolved URLs
+Direct HLS requires cross-origin manifest, segment, and key access. Some Cinejoy
+CDNs reject the watch site's Origin/Referer even when the stream is playable in
+mpv. Inline HLS sessions retry automatically through `/media/{room}/{asset}`:
+the service supplies provider headers, rewrites child playlist/segment/key/map
+URLs, and streams original bytes to the browser. This consumes service bandwidth
+but does not encode video or use host upload bandwidth. URLs must be discovered
+in the room's playlist; arbitrary URL request parameters are not accepted. The
+room token is required, assets expire with the room, requests are bounded, and
+HTTPS-only upstreams use pinned public DNS addresses with redirects disabled.
+Viewer cookies, auth headers, and referrers are never forwarded upstream.
+
+MSE is preferred even if the browser advertises native HLS, since that capability
+check alone does not establish support for blob-backed master playlists. Native
+HLS remains the fallback when MSE is unavailable. Resolved URLs
 can expire or be bound to the host's IP. YouTube must allow embedding and may
-apply region, age, or authentication restrictions. The fallback checkbox is
-available before starting a new session when direct playback is blocked.
+apply region, age, or authentication restrictions. The broadcast checkbox remains available before starting a new session if
+both direct access and the original-byte fallback fail.
 
 The page CSP permits provider media connections and YouTube scripts/frames.
 `strict-origin-when-cross-origin` supplies the origin needed by YouTube without
@@ -83,6 +97,8 @@ and source failure. YouTube is checked against a mock of its public player API;
 live provider checks are opt-in. Set `NVPLAY_DIRECT_LIVE_YOUTUBE` to a public
 YouTube video ID and/or `NVPLAY_DIRECT_CINEJOY_METADATA` to the JSON output of
 the existing Cinejoy resolver to exercise real provider playback as well.
+`NVPLAY_DIRECT_FORCE_PROXY=1` blocks browser-to-provider requests in that live
+Cinejoy check, verifying decoding through the real service fallback.
 The default fixture suite does not establish live provider availability.
 The Rust direct-worker test verifies session creation without FFmpeg, state and
 control delivery, permissions updates, membership, and shutdown on the wire.

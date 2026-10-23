@@ -40,7 +40,7 @@ fn sized_button(
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), help));
     if ui.is_rect_visible(rect) {
-        let color = super::ACCENT;
+        let color = ui.visuals().selection.stroke.color;
         let stroke = Stroke::new(1.4_f32, color);
         let center = rect.center();
         let p = |x, y| center + vec2(x, y);
@@ -177,10 +177,10 @@ fn sized_button(
 }
 
 /// Transparent brand mark used on the empty or stopped video surface.
-pub fn load_logo(ctx: &egui::Context) -> egui::TextureHandle {
+pub fn load_logo(ctx: &egui::Context, monochrome: bool) -> egui::TextureHandle {
     let image = image::load_from_memory(include_bytes!("assets/nvplay-mark.png"))
-        .expect("bundled nvplay logo must be a valid PNG")
-        .to_rgba8();
+        .expect("bundled nvplay logo must be a valid PNG");
+    let image = if monochrome { image.grayscale() } else { image }.to_rgba8();
     ctx.load_texture(
         "nvplay-brand-mark",
         egui::ColorImage::from_rgba_unmultiplied(

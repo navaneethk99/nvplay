@@ -248,7 +248,7 @@ impl Updates {
             let mut automatic = self.automatic;
             if ui.checkbox(&mut automatic, "Automatically check and install updates").changed() { self.toggle_automatic(); }
             ui.small("Automatic updates rebuild changed source in the background. Restart when convenient; playback is not interrupted. Rust and this source folder are required.");
-            if let Some(error) = &self.config_error { ui.colored_label(egui::Color32::RED, error); }
+            if let Some(error) = &self.config_error { ui.colored_label(ui.visuals().error_fg_color, error); }
         });
         self.open = open;
     }

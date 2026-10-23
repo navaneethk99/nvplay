@@ -162,7 +162,7 @@ impl MovieSearch {
                     });
                 }
                 if let Some(error) = self.error.clone() {
-                    ui.label(RichText::new(error).color(Color32::from_rgb(240, 100, 85)));
+                    ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
                     if ui.button("Try again").clicked() { self.start(); }
                 }
                 if self.results.is_empty() {

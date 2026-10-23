@@ -80,6 +80,7 @@ pub(super) async fn run(
                             }
                         }
                         Some(Ok(WsMessage::Pong(_))) => {},
+                        _ if !created => return Err("The watch service closed the connection before creating a direct-playback session. Update the deployed watch server, or select ‘Stream from my device instead’ and try again.".into()),
                         _ => return Err("The watch service disconnected. Start a new watch party to reconnect.".into()),
                     }
                 }

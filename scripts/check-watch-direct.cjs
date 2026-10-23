@@ -104,13 +104,36 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     console.log('MP4: two viewers, late join, host and viewer controls, speed, drift correction, reconnect, permissions, and cleanup passed.');
     const playlist = `#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\n${mediaOrigin}/movie.m3u8\n`;
     const hls = await room({kind: 'hls_playlist', playlist});
-    const h = await join(hls);
+    const h = await join(hls, page => page.addInitScript(() => {
+      const original = HTMLMediaElement.prototype.canPlayType;
+      HTMLMediaElement.prototype.canPlayType = function(type) {
+        return type === 'application/vnd.apple.mpegurl' ? 'probably' : original.call(this, type);
+      };
+    }));
     await h.waitForFunction(() => controlsReady && video.readyState >= 2 && Math.abs(video.currentTime - 10) < .25);
     await h.locator('#play').click();
     await h.waitForFunction(() => video.getVideoPlaybackQuality().totalVideoFrames > 10 && !video.paused);
     assert(requests.some(url => url.endsWith('.ts')));
+    assert(await h.evaluate(() => !!direct.hls), 'MSE should take priority over advertised native HLS');
     hls.stop();
-    console.log('HLS: shared inline master playlist fetched and decoded directly from a separate origin.');
+    console.log('HLS: separate-origin decode passed even when native HLS is advertised.');
+    const fallback = await room({kind: 'hls_playlist', playlist});
+    const f = await join(fallback, async page => {
+      await page.route(`${mediaOrigin}/**`, route => route.fulfill({status: 403, body: 'Provider requires headers'}));
+      await page.route('**/media/**', async route => {
+        const url = new URL(route.request().url());
+        const file = url.pathname.endsWith('/master') ? 'movie.m3u8' : path.basename(url.pathname);
+        if (file === 'movie.m3u8') {
+          const text = fs.readFileSync(path.join(temp, file), 'utf8').replace(/^(movie\d+\.ts)$/gm, `/media/mock/$1`);
+          await route.fulfill({contentType: 'application/vnd.apple.mpegurl', body: text});
+        } else await route.fulfill({contentType: 'video/mp2t', body: fs.readFileSync(path.join(temp, file))});
+      });
+    });
+    await f.waitForFunction(() => direct?.usingProxy && direct.ready && video.readyState >= 2, null, {timeout: 30000});
+    await f.locator('#play').click();
+    await f.waitForFunction(() => video.getVideoPlaybackQuality().totalVideoFrames > 10 && !video.paused);
+    fallback.stop();
+    console.log('Blocked provider: automatic original-media fallback decoded without WebRTC.');
     const youtube = await room({kind: 'youtube', id: 'dQw4w9WgXcQ'});
     const y = await join(youtube, page => page.route('https://www.youtube.com/iframe_api', route => route.fulfill({contentType: 'text/javascript', body: `window.YT={Player:class { constructor(el,options){this.position=0;this.rate=1;this.state=2;setTimeout(()=>options.events.onReady(),0);}getCurrentTime(){return this.position;}seekTo(p){this.position=p;}getAvailablePlaybackRates(){return [1,1.5,2];}getPlaybackRate(){return this.rate;}setPlaybackRate(r){this.rate=r;}getPlayerState(){return this.state;}playVideo(){this.state=1;}pauseVideo(){this.state=2;}setVolume(){}mute(){}unMute(){}destroy(){} }};window.onYouTubeIframeAPIReady();`})));
     await y.waitForFunction(() => controlsReady && direct.youtube.getCurrentTime() === 10 && direct.youtube.getPlayerState() === 2);
@@ -121,7 +144,9 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     if (process.env.NVPLAY_DIRECT_CINEJOY_METADATA) {
       const metadata = JSON.parse(fs.readFileSync(process.env.NVPLAY_DIRECT_CINEJOY_METADATA, 'utf8'));
       const live = await room({kind: 'hls_playlist', playlist: metadata.playlist});
-      const livePage = await join(live);
+      const livePage = await join(live, process.env.NVPLAY_DIRECT_FORCE_PROXY === '1'
+        ? page => page.route('https://**/*', route => route.fulfill({status: 403, body: 'Direct access intentionally blocked by regression test'}))
+        : undefined);
       await livePage.waitForFunction(() => direct?.ready || direct?.failed, null, {timeout: 30000});
       assert.equal(await livePage.evaluate(() => direct.failed), false, await livePage.locator('#status').textContent());
       await livePage.locator('#play').click();
@@ -129,8 +154,9 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
         const details = await livePage.evaluate(() => ({status: $('status').textContent, ready: direct?.ready, failed: direct?.failed, hostPaused: state?.paused, paused: video.paused, position: video.currentTime, readyState: video.readyState, frames: video.getVideoPlaybackQuality().totalVideoFrames, mediaError: video.error?.code}));
         throw Error(`Live provider playback did not advance: ${JSON.stringify(details)}`);
       });
+      const delivery = await livePage.evaluate(() => direct.usingProxy ? 'service fallback' : 'direct access');
       live.stop();
-      console.log('Live Cinejoy: resolved playlist decoded directly in the browser.');
+      console.log(`Live Cinejoy: browser decoded resolved playlist via ${delivery}.`);
     }
     if (process.env.NVPLAY_DIRECT_LIVE_YOUTUBE) {
       const live = await room({kind: 'youtube', id: process.env.NVPLAY_DIRECT_LIVE_YOUTUBE});
@@ -147,6 +173,11 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     await errorPage.waitForFunction(() => direct?.failed && !controlsReady && $('overlay-text').textContent.includes('cannot play'));
     bad.stop();
     console.log('Unavailable source: actionable playback error shown without a reconnect loop.');
+  } catch (error) {
+    if (browser) for (const context of browser.contexts()) for (const page of context.pages()) {
+      console.error('Playback diagnostics:', await page.evaluate(() => ({status: $('status')?.textContent, mode: direct?.media.kind, failed: direct?.failed, proxy: direct?.usingProxy, mse: !!direct?.hls, ready: direct?.ready, videoState: video.readyState, error: video.error?.code, position: video.currentTime, hostPosition: state?.position, lastError: direct?.lastError})).catch(() => ({})));
+    }
+    throw error;
   } finally {
     for (const timer of timers) clearInterval(timer);
     for (const socket of sockets) socket.close();

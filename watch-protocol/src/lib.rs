@@ -1,4 +1,6 @@
 //! Messages shared by the desktop broadcaster, signaling service, and browser.
+mod social;
+pub use social::*;
 use serde::{Deserialize, Serialize};
 
 pub const MAX_VIEWERS: usize = 6;
@@ -67,7 +69,7 @@ impl Access {
     }
 }
 
-/// Browser-owned playback. No media bytes pass through the host or relay.
+/// Browser-owned playback. Restricted HLS sources can use an original-byte service fallback.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Media {
@@ -149,13 +151,21 @@ pub enum Message {
         ice_servers: Vec<IceServer>,
     },
     Join {
+        #[serde(default)]
+        name: String,
         room: String,
         token: String,
         #[serde(default)]
         client_offers: bool,
     },
     Joined {
+        #[serde(default)]
+        participants: Vec<Participant>,
+        #[serde(default)]
+        history: Vec<ChatEntry>,
         peer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_proxy: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         media: Option<Media>,
         #[serde(default)]
@@ -165,8 +175,13 @@ pub enum Message {
         access: Access,
     },
     PeerJoined {
+        #[serde(default)]
+        name: String,
         peer: String,
     },
+    ChatSend { text: String },
+    Chat { entry: ChatEntry },
+    ChatRejected { message: String },
     PeerLeft {
         peer: String,
     },

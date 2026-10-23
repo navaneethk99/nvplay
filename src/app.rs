@@ -1,4 +1,6 @@
+mod appearance;
 mod audio;
+mod audio_settings;
 mod history_artwork;
 mod history_panel;
 mod icons;
@@ -7,10 +9,12 @@ mod movie_search;
 mod native_menu;
 mod posters;
 mod preview;
+mod settings_panel;
 mod subtitle_controls;
 mod subtitle_search;
 #[cfg(target_os = "macos")]
 mod updates;
+mod video_aurora;
 mod watch_party;
 
 use crate::{
@@ -61,6 +65,7 @@ impl Media {
 enum DialogResult {
     Media(Vec<PathBuf>),
     Subtitle { path: PathBuf, generation: u64 },
+    Audio { path: PathBuf, generation: u64 },
     Folder(Result<Vec<PathBuf>, String>),
 }
 
@@ -95,6 +100,12 @@ pub struct PlayerApp {
     fullscreen: bool,
     repeat: bool,
     show_help: bool,
+    show_settings: bool,
+    settings_tab: settings_panel::SettingsTab,
+    audio_settings: audio_settings::AudioSettings,
+    appearance: appearance::Theme,
+    video_aurora: video_aurora::VideoAurora,
+    appearance_error: Option<String>,
     show_playlist: bool,
     url_error: Option<String>,
     tools: streaming::Tools,
@@ -166,10 +177,14 @@ impl PlayerApp {
         sources: Vec<OsString>,
     ) -> Self {
         let startup_error = error.is_some();
+        let loaded_theme = appearance::Theme::load();
+        let appearance_error = loaded_theme.as_ref().err().cloned();
+        let appearance = loaded_theme.unwrap_or_default();
+        appearance.apply(ctx);
         let mut app = Self {
             player,
             renderer: Arc::new(Mutex::new(renderer)),
-            brand_logo: icons::load_logo(ctx),
+            brand_logo: icons::load_logo(ctx, appearance.is_grayscale()),
             queue: Vec::new(),
             current: None,
             error,
@@ -187,6 +202,12 @@ impl PlayerApp {
             fullscreen: false,
             repeat: false,
             show_help: false,
+            show_settings: false,
+            settings_tab: settings_panel::SettingsTab::default(),
+            audio_settings: audio_settings::AudioSettings::default(),
+            appearance,
+            video_aurora: video_aurora::VideoAurora::default(),
+            appearance_error,
             show_playlist: false,
             url_error: None,
             tools: streaming::Tools::discover(),
@@ -232,6 +253,10 @@ impl PlayerApp {
     }
 
     fn command(&mut self, args: &[&str]) {
+        if matches!(args, ["set", "aid", _] | ["stop"]) {
+            self.clear_audio_mix();
+        }
+
         if let Some(player) = &mut self.player
             && let Err(error) = player.command(args)
         {
@@ -239,6 +264,9 @@ impl PlayerApp {
         }
     }
     fn play(&mut self, index: usize) {
+        if self.queue.get(index).is_some() {
+            self.clear_audio_mix();
+        }
         if self.player.is_some() && self.queue.get(index).is_some() {
             self.checkpoint_history();
             self.watch_history.flush();
@@ -371,6 +399,11 @@ impl PlayerApp {
                 DialogResult::Media(paths) => self.add_paths(paths),
                 DialogResult::Folder(Ok(paths)) => self.enqueue_paths(paths, false),
                 DialogResult::Folder(Err(error)) => self.error = Some(error),
+                DialogResult::Audio { path, generation } => {
+                    if generation == self.playback_generation {
+                        self.add_external_audio(path);
+                    }
+                }
                 DialogResult::Subtitle { path, generation } => {
                     if generation == self.playback_generation {
                         self.add_subtitle(path);
@@ -401,6 +434,10 @@ impl PlayerApp {
         }
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Comma)) {
+            self.open_settings();
+            return;
+        }
         if ctx
             .input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::M))
         {
@@ -420,6 +457,10 @@ impl PlayerApp {
                 self.show_url = false;
                 return;
             }
+            if self.show_settings {
+                self.show_settings = false;
+                return;
+            }
             if self.show_help {
                 self.show_help = false;
                 return;
@@ -436,6 +477,7 @@ impl PlayerApp {
         if ctx.wants_keyboard_input()
             || self.show_url
             || self.show_help
+            || self.show_settings
             || self.movie_search.open
             || self.subtitle_search.open
         {
@@ -501,8 +543,7 @@ impl PlayerApp {
     fn menu(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu")
             .frame(
-                egui::Frame::new()
-                    .fill(BAR_BACKGROUND)
+                self.chrome_frame(ctx)
                     .inner_margin(egui::Margin::symmetric(5, 1)),
             )
             .show(ctx, |ui| self.menu_contents(ui));
@@ -580,6 +621,11 @@ impl PlayerApp {
                 ui.checkbox(&mut self.repeat, "Repeat playlist");
             });
             ui.menu_button("Audio", |ui| {
+                if ui.button("Audio Settings…").clicked() {
+                    self.open_audio_settings();
+                    ui.close();
+                }
+
                 ui.menu_button("Audio Track", |ui| self.track_menu(ui, "audio", "aid"));
                 ui.menu_button("Audio Device", |ui| {
                     let (devices, current) = self
@@ -632,6 +678,10 @@ impl PlayerApp {
                 }
             });
             ui.menu_button("View", |ui| {
+                if ui.button("Settings…").clicked() {
+                    self.open_settings();
+                    ui.close();
+                }
                 ui.checkbox(&mut self.show_playlist, "Playlist");
                 ui.checkbox(&mut self.show_info, "Playback information");
                 if ui.button("History").clicked() {
@@ -659,8 +709,9 @@ impl PlayerApp {
             .default_width(280.0)
             .width_range(200.0..=(ctx.available_rect().width() * 0.6).max(200.0))
             .resizable(true)
-            .frame(egui::Frame::new().fill(BAR_BACKGROUND).inner_margin(8.0))
+            .frame(self.chrome_frame(ctx).inner_margin(8.0))
             .show(ctx, |ui| {
+                self.paint_video_aurora(ui);
                 if self.fullscreen {
                     // Fullscreen controls overlay the top and bottom of the video.
                     ui.add_space(if cfg!(target_os = "macos") {
@@ -901,15 +952,14 @@ impl PlayerApp {
     fn topbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("topbar")
             .frame(
-                egui::Frame::new()
-                    .fill(BAR_BACKGROUND)
+                self.chrome_frame(ctx)
                     .inner_margin(egui::Margin::symmetric(6, 3)),
             )
             .show(ctx, |ui| self.topbar_contents(ui));
     }
 
     fn topbar_contents(&mut self, ui: &mut egui::Ui) {
-        bar_style(ui);
+        self.paint_video_aurora(ui);
         let ctx = ui.ctx().clone();
         let idle = self.player.as_ref().is_none_or(|p| p.state.idle);
         ui.horizontal(|ui| {
@@ -986,8 +1036,7 @@ impl PlayerApp {
     fn controls(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("controls")
             .frame(
-                egui::Frame::new()
-                    .fill(BAR_BACKGROUND)
+                self.chrome_frame(ctx)
                     .inner_margin(egui::Margin::symmetric(6, 3)),
             )
             .show(ctx, |ui| self.controls_contents(ui));
@@ -1003,7 +1052,7 @@ impl PlayerApp {
         self.ctx.request_repaint();
     }
     fn controls_contents(&mut self, ui: &mut egui::Ui) {
-        bar_style(ui);
+        self.paint_video_aurora(ui);
         let ctx = ui.ctx().clone();
         let state = self.player.as_ref().map(|p| &p.state);
         let (position, duration, paused, volume, idle, buffering, seekable, muted) = state
@@ -1097,7 +1146,7 @@ impl PlayerApp {
                 egui::vec2(timeline_width, 28.0),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.visuals_mut().selection.bg_fill = ACCENT;
+                    ui.visuals_mut().selection.bg_fill = ui.visuals().selection.stroke.color;
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let elapsed = format_time(display_position);
                     let remaining = if !idle && duration <= 0.0 {
@@ -1234,7 +1283,7 @@ impl PlayerApp {
                                 .color(if muted {
                                     Color32::GRAY
                                 } else {
-                                    Color32::from_gray(200)
+                                    ui.visuals().text_color()
                                 }),
                         )
                         .halign(egui::Align::RIGHT),
@@ -1244,7 +1293,7 @@ impl PlayerApp {
                 // retain their contrasting background.
                 let response = ui
                     .scope(|ui| {
-                        ui.visuals_mut().selection.bg_fill = ACCENT;
+                        ui.visuals_mut().selection.bg_fill = ui.visuals().selection.stroke.color;
                         ui.add_enabled(
                             self.player.is_some(),
                             egui::Slider::new(&mut volume, 0.0..=100.0)
@@ -1397,8 +1446,7 @@ impl PlayerApp {
             .movable(false)
             .fixed_pos(screen.left_top())
             .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(BAR_BACKGROUND)
+                self.chrome_frame(ctx)
                     .inner_margin(egui::Margin::symmetric(6, 3))
                     .show(ui, |ui| {
                         ui.set_width(screen.width() - 12.0);
@@ -1412,8 +1460,7 @@ impl PlayerApp {
             .movable(false)
             .fixed_pos(egui::pos2(screen.left(), screen.bottom() - 34.0))
             .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(BAR_BACKGROUND)
+                self.chrome_frame(ctx)
                     .inner_margin(egui::Margin::symmetric(6, 3))
                     .show(ui, |ui| {
                         ui.set_width(screen.width() - 12.0);
@@ -1454,6 +1501,10 @@ impl PlayerApp {
                         self.open_movie_search();
                         ui.close();
                     }
+                    if ui.button("Settings…").clicked() {
+                        self.open_settings();
+                        ui.close();
+                    }
                     if ui.button("Fullscreen").clicked() {
                         self.toggle_fullscreen(ctx);
                         ui.close();
@@ -1492,7 +1543,7 @@ impl PlayerApp {
                         "YouTube and supported sites play here. Netflix / DRM is unsupported.",
                     )
                     .size(10.0)
-                    .color(Color32::from_gray(90)),
+                    .color(ui.visuals().weak_text_color()),
                 );
                 if let Some(player) = &mut self.player {
                     egui::ComboBox::from_label("Stream quality")
@@ -1506,12 +1557,12 @@ impl PlayerApp {
                 }
                 if self.tools.ytdlp.is_none() {
                     ui.colored_label(
-                        Color32::from_rgb(165, 73, 0),
+                        ui.visuals().warn_fg_color,
                         "Website playback needs yt-dlp. Direct video URLs work without it.",
                     );
                 }
                 if let Some(error) = &self.url_error {
-                    ui.colored_label(Color32::from_rgb(175, 30, 20), error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 ui.horizontal(|ui| {
                     if ui
@@ -1678,10 +1729,14 @@ impl PlayerApp {
             PlaybackEvent::Loaded => {
                 self.loading = false;
                 self.restore_subtitle();
+                self.restore_audio_settings();
                 self.history_loaded();
             }
             PlaybackEvent::SubtitleAdded { id, result } => self.subtitle_added(id, result),
             PlaybackEvent::MuteApplied { id, result } => self.mute_applied(id, result),
+            PlaybackEvent::AudioSettingsApplied { id, result } => {
+                self.audio_settings_applied(id, result)
+            }
         }
     }
 
@@ -1724,6 +1779,7 @@ impl PlayerApp {
         self.poll_watch_party();
         self.poll_mute(ctx);
         self.subtitle_preferences.poll(ctx);
+        self.poll_audio_settings(ctx);
         self.poll_history();
         let drops = ctx.input(|i| {
             i.raw
@@ -1753,6 +1809,7 @@ impl PlayerApp {
             ctx.request_repaint();
         }
         self.shortcuts(ctx);
+        self.update_video_aurora(ctx);
         let title = self
             .player
             .as_ref()
@@ -1813,6 +1870,7 @@ impl PlayerApp {
             || self.movie_search.open
             || self.subtitle_search.open
             || self.show_help
+            || self.show_settings
             || self.show_info
             || self.show_playlist
             || self.seek_preview.is_some()
@@ -1849,6 +1907,7 @@ impl PlayerApp {
 
         #[cfg(target_os = "macos")]
         self.updates.ui(ctx);
+        self.settings_dialog(ctx);
         self.network_dialog(ctx);
         self.movie_search_dialog(ctx);
         self.subtitle_search_dialog(ctx);
@@ -1861,6 +1920,7 @@ impl PlayerApp {
                         .spacing([30.0, 12.0])
                         .show(ui, |ui| {
                             for (key, action) in [
+                                ("Ctrl / Cmd + ,", "Settings"),
                                 ("Ctrl / Cmd + O", "Open media"),
                                 ("Ctrl / Cmd + N", "Open network stream"),
                                 ("Ctrl / Cmd + Shift + M", "Search movies"),
@@ -1872,7 +1932,9 @@ impl PlayerApp {
                                 ("F / double click video", "Toggle fullscreen"),
                                 ("Escape", "Leave fullscreen"),
                             ] {
-                                ui.label(RichText::new(key).color(ACCENT));
+                                ui.label(
+                                    RichText::new(key).color(ui.visuals().selection.stroke.color),
+                                );
                                 ui.label(action);
                                 ui.end_row();
                             }
@@ -1917,6 +1979,7 @@ impl eframe::App for PlayerApp {
         self.checkpoint_history();
         self.watch_history.flush();
         self.subtitle_preferences.flush();
+        self.audio_settings.flush();
         // Free mpv and our FBO before eframe destroys the current GL context.
         self.renderer.lock().unwrap().take();
     }
@@ -2079,10 +2142,6 @@ fn chrome_visuals() -> egui::Visuals {
     visuals
 }
 
-fn bar_style(ui: &mut egui::Ui) {
-    *ui.visuals_mut() = chrome_visuals();
-}
-
 fn theme(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.visuals = chrome_visuals();
@@ -2105,6 +2164,43 @@ fn theme(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_settings_navigation_fits_the_compact_window() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
+        app.initial_resize = false;
+        app.open_audio_settings();
+        draw(&mut app, vec![]);
+        let output = draw(&mut app, vec![]);
+        assert_eq!(app.settings_tab, settings_panel::SettingsTab::Audio);
+        let tab = named_rect(&output, "Appearance");
+        assert!(tab.left() >= 0.0 && tab.right() <= 640.0);
+        click(&mut app, named_rect(&output, "Appearance").center());
+        let output = draw(&mut app, vec![]);
+        assert_eq!(app.settings_tab, settings_panel::SettingsTab::Appearance);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == "Theme")), "theme picker must be visible after switching tabs");
+    }
+
+    #[test]
+    fn settings_shortcut_opens_and_escape_closes_without_playback_shortcuts() {
+        let ctx = egui::Context::default();
+        let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        draw(&mut app, vec![key(Key::Comma, egui::Modifiers::COMMAND)]);
+        assert!(app.show_settings);
+        draw(&mut app, vec![key(Key::ArrowDown, egui::Modifiers::NONE)]);
+        assert!(app.pending_volume.is_none());
+        draw(&mut app, vec![key(Key::Escape, egui::Modifiers::NONE)]);
+        assert!(!app.show_settings);
+    }
 
     #[test]
     fn folder_import_filters_sorts_and_appends_without_changing_current_media() {
@@ -2500,6 +2596,15 @@ mod tests {
         let media = std::env::var_os("NVPLAY_TEST_MEDIA").expect("set NVPLAY_TEST_MEDIA");
         let mut app = PlayerApp::from_parts(&ctx, Some(player), Some(renderer), None, vec![media]);
         app.initial_resize = false;
+        app.updates.automatic = false;
+        let ambient = std::env::var_os("NVPLAY_TEST_AMBIENT").is_some();
+        if ambient {
+            app.appearance = appearance::Theme::VideoAurora;
+            app.appearance.apply(&ctx);
+        }
+        if std::env::var_os("NVPLAY_TEST_SETTINGS").is_some() {
+            app.open_audio_settings();
+        }
         let mut painter = eframe::egui_glow::Painter::new(gl.clone(), "", None, false).unwrap();
         let destination = unsafe {
             let texture = gl.create_texture().unwrap();
@@ -2601,6 +2706,38 @@ mod tests {
             std::thread::sleep(
                 Duration::from_secs_f64(1.0 / 60.0).saturating_sub(frame_start.elapsed()),
             );
+        }
+        if ambient {
+            assert!(
+                app.renderer
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .ambient_palette(true, app.playback_generation)
+                    .is_some()
+            );
+            assert_ne!(
+                ctx.style().visuals.panel_fill,
+                appearance::Theme::VideoAurora.visuals().panel_fill
+            );
+        }
+        if let Some(path) = std::env::var_os("NVPLAY_TEST_SCREENSHOT") {
+            let mut pixels = vec![0; 1280 * 800 * 4];
+            // SAFETY: this test's destination FBO is current and sized 1280×800.
+            unsafe {
+                gl.read_pixels(
+                    0,
+                    0,
+                    1280,
+                    800,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelPackData::Slice(Some(&mut pixels)),
+                );
+            }
+            let image = image::RgbaImage::from_raw(1280, 800, pixels).unwrap();
+            image::imageops::flip_vertical(&image).save(path).unwrap();
         }
         app.renderer.lock().unwrap().take();
         drop(app);

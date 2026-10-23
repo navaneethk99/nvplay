@@ -1,3 +1,6 @@
+pub(crate) const AUDIO_SETTINGS_TAG: u64 = 1 << 62;
+mod ambient;
+pub(crate) use ambient::VideoPalette;
 mod ffi;
 mod output_gate;
 mod properties;
@@ -35,6 +38,7 @@ pub struct PlaybackState {
     pub audio_device: String,
     pub audio_output: String,
     pub audio_track: String,
+    pub audio_delay: f64,
     pub subtitle_track: String,
     pub audio_codec: String,
     pub audio_channels: i64,
@@ -54,6 +58,7 @@ pub enum PlaybackEvent {
     Loaded,
     SubtitleAdded { id: u64, result: Result<(), String> },
     MuteApplied { id: u64, result: Result<(), String> },
+    AudioSettingsApplied { id: u64, result: Result<(), String> },
 }
 
 pub struct Player {
@@ -224,6 +229,7 @@ impl Player {
             ("current-ao", 1),
             ("ao-volume", 5),
             ("aid", 1),
+            ("audio-delay", 5),
             ("sid", 1),
             ("audio-codec-name", 1),
             ("audio-params/channel-count", 4),
@@ -317,6 +323,11 @@ impl Player {
             self.pending_load_error = None;
         }
         self.command_tagged(arguments, u64::from(arguments.first() == Some(&"loadfile")))
+    }
+
+    pub(crate) fn configure_audio(&mut self, arguments: &[&str], id: u64) -> Result<(), String> {
+        debug_assert!(id & AUDIO_SETTINGS_TAG != 0);
+        self.command_tagged(arguments, id)
     }
 
     /// Send an explicit native flag update; never wait for the audio core on the UI thread.
@@ -482,6 +493,12 @@ impl Player {
                         result: self.client.api.check(event.error),
                     });
                 }
+                5 if event.userdata & AUDIO_SETTINGS_TAG != 0 => {
+                    events.push(PlaybackEvent::AudioSettingsApplied {
+                        id: event.userdata,
+                        result: self.client.api.check(event.error),
+                    });
+                }
                 5 if event.userdata >= 2 => {
                     events.push(PlaybackEvent::SubtitleAdded {
                         id: event.userdata,
@@ -602,6 +619,9 @@ impl Player {
                         }
                         (b"duration", 5) => {
                             self.state.duration = unsafe { *prop.data.cast::<f64>() }
+                        }
+                        (b"audio-delay", 5) => {
+                            self.state.audio_delay = unsafe { *prop.data.cast::<f64>() }
                         }
                         (b"volume", 5) => self.state.volume = unsafe { *prop.data.cast::<f64>() },
                         (b"ao-volume", 5) => {

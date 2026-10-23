@@ -28,6 +28,8 @@ enum Action {
     History,
     Info,
     Help,
+    Settings,
+    AudioSettings,
     Quit,
     CheckUpdates,
     AutomaticUpdates,
@@ -223,7 +225,13 @@ impl NativeMenu {
         let group = &mut result.groups[0];
         populate(
             &group.menu,
-            &[updates, Entry::separator(), quit],
+            &[
+                Entry::item("Settings…", Action::Settings).key(","),
+                Entry::separator(),
+                updates,
+                Entry::separator(),
+                quit,
+            ],
             &result.inbox,
             &mut group.handlers,
             mtm,
@@ -325,6 +333,8 @@ impl PlayerApp {
             Action::Playlist => self.show_playlist = !self.show_playlist,
             Action::History => self.open_history(),
             Action::Info => self.show_info = !self.show_info,
+            Action::Settings => self.open_settings(),
+            Action::AudioSettings => self.open_audio_settings(),
             Action::Help => self.show_help = true,
             Action::Quit => self.ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Action::Command(args) => {
@@ -412,6 +422,7 @@ impl PlayerApp {
                 Entry::item("Repeat playlist", Repeat).checked(self.repeat),
             ],
             vec![
+                Entry::item("Audio Settings…", AudioSettings),
                 Entry::submenu("Audio Track", tracks("audio", "aid")),
                 Entry::submenu("Audio Device", devices),
                 Entry::item("Mute", Mute)

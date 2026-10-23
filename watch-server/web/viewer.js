@@ -80,7 +80,7 @@ function syncVolume() {
   $('mute').style.opacity = userMuted || video.volume === 0 ? '.5' : '1';
 }
 function updateAccess() {
-  $('control-note').textContent = !controlsReady ? 'Connecting…' : access.play_pause && access.seek ? 'Shared controls' : !access.play_pause && !access.seek ? 'Watch only' : 'Limited controls';
+  $('control-note').textContent = direct?.failed ? 'Playback unavailable' : !controlsReady ? 'Connecting…' : access.play_pause && access.seek ? 'Shared controls' : !access.play_pause && !access.seek ? 'Watch only' : 'Limited controls';
   $('rights').textContent = `Play / pause: ${access.play_pause ? 'allowed' : 'host only'}. Seeking: ${access.seek ? 'allowed' : 'host only'}. Your volume and fullscreen only affect you.`;
 }
 function enabled(value) {
@@ -132,10 +132,10 @@ function connect() {
           access = message.access;
           peerId = message.peer;
           if (message.media) {
-            direct = new BrowserPlayback(message.media, video,
-              () => { enabled(true); keepAwake(); $('overlay').hidden = true; status('Connected · direct playback'); syncDirect(); syncVolume(); },
+            direct = new BrowserPlayback({...message.media, fallback_url: message.media_proxy}, video,
+              () => { enabled(true); keepAwake(); $('overlay').hidden = true; status(direct?.usingProxy ? 'Connected · original media via watch service' : 'Connected · direct playback'); syncDirect(); syncVolume(); },
               error => { enabled(false); status(error); $('overlay').hidden = false; $('overlay-text').textContent = error; $('overlay-description').hidden = false; $('overlay-description').textContent = 'Ask the host to start a new session with “Stream from my device instead”.'; $('join').hidden = true; },
-              autoplayPrompt);
+              autoplayPrompt, () => status('Provider blocks direct access. Loading through the watch service…'));
             direct.start();
             break;
           }
@@ -192,8 +192,9 @@ function connect() {
           // the host's still frame. No audio is sent while paused.
           syncVolume();
           resumeVideo();
+          if (direct?.failed) break;
           if (state.buffering) status('The host is buffering…');
-          else if (direct?.ready && !direct.failed) status('Connected · direct playback');
+          else if (direct?.ready && !direct.failed) status(direct.usingProxy ? 'Connected · original media via watch service' : 'Connected · direct playback');
           else if (peer?.connectionState === 'connected') status(accessStatus());
           break;
         case 'ended': finish('The host ended this watch party.'); break;

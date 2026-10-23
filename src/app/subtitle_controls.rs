@@ -202,7 +202,7 @@ impl super::PlayerApp {
                 if ui.add_enabled(!self.dialog_busy, egui::Button::new("Add subtitle file…")).clicked() { self.pick(true); }
                 if ui.button("Download subtitle…").clicked() { self.open_subtitle_search(); }
             });
-            if let Some(error) = &self.subtitle_preferences.error { ui.colored_label(super::ACCENT, error); }
+            if let Some(error) = &self.subtitle_preferences.error { ui.colored_label(ui.visuals().selection.stroke.color, error); }
         });
         if style != before {
             self.subtitle_preferences.library.set_style(style);

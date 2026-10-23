@@ -4,6 +4,45 @@ A native Rust media player with a compact, VLC-inspired desktop interface for Wi
 
 This is a working foundation, not feature parity with VLC. Format support comes from the installed mpv/FFmpeg build: common containers and codecs such as MP4, MKV, WebM, MOV, AVI, H.264, HEVC, VP9, and AV1 are typically supported. DRM-protected services, corrupt files, and codecs omitted from your engine build are not guaranteed to play. OpenGL 3.3 or newer is required.
 
+## Themes
+
+Open **nvplay → Settings…** on macOS, **View → Settings…** on Windows/Linux,
+or press **Cmd/Ctrl+,**. The video context menu also offers Settings.
+The theme dropdown includes **Original**, **Light**, **Dark**, **Monochrome**,
+**Liquid Glass**, **Cyber**, **Rain**, **Vercel**, **Aurora**, **Sunset**, **Forest**,
+**Rosé Pine**, **Ocean**, **Sand**, **Terminal**, **Lavender**, and **Video Aurora**.
+Changes apply immediately and are saved for the next launch. Original preserves
+the classic charcoal and orange appearance. Monochrome and Vercel use grayscale controls
+and a grayscale logo; media and artwork retain their colors. Liquid Glass uses
+translucent pearl surfaces and rounded controls inspired by Apple platforms;
+it does not provide native backdrop blur. The current app targets desktop platforms.
+
+**Video Aurora** follows the currently rendered video, blending scene colors into
+flowing ribbons behind the controls and sidebar. It samples a tiny frame four
+times per second while selected, works with local files and streams, and keeps
+text readable over dark surfaces. Ribbons pause with playback; idle and audio-only
+playback use a calm fallback palette. Video pixels remain unchanged.
+
+## Audio settings
+
+Open **Settings → Audio**, or choose **Audio → Audio Settings…**. Select an audio
+track or output device, adjust volume and mute, and fine-tune audio/video sync.
+**Add external audio…** loads a soundtrack or commentary into the current file's
+track list. Tracks and output selection are session controls.
+
+Enable **Sound enhancements** for a 10-band equalizer, six presets (including
+Bass boost, Clear dialogue, and Treble cut), preamp, balance, mono downmix,
+night mode, volume leveling, and a peak limiter. Boosted EQ bands reserve
+headroom automatically. Enhancements persist across launches. Balance and mono
+downmix surround audio; disabling enhancements bypasses processing.
+
+**Mix multiple audio tracks** combines two to four tracks with relative levels
+and normalized output. Apply the mix after choosing tracks, or return to a
+single track. Mixes reset when another file opens. The engine uses one output
+device at a time; for simultaneous speakers and headphones, create a system
+multi-output device and choose it in the output dropdown. On macOS, **Open Audio
+MIDI Setup…** opens the system utility for this.
+
 ## Run
 
 Install [Rust](https://rustup.rs), then install the playback runtime for your platform:
@@ -109,8 +148,10 @@ pause, seek, or join. **End session** revokes the link.
 
 YouTube videos use the provider's embedded player on each viewer's device.
 Supported media URLs (including MP4/WebM and HLS) and Cinejoy's resolved HLS
-playlist also play directly in the browser. Only playback state and control
-requests pass through the watch service; these sessions do not need host-side
+playlist also play directly in the browser. Playback state and control requests pass through the watch service. If a
+resolved HLS provider blocks direct browser requests, the service can fetch the
+original playlist and media bytes for the viewer, without re-encoding. These
+sessions do not need host-side
 FFmpeg, video encoding, or a WebRTC media uplink. Viewers follow the host's
 position, pause, buffering, and speed, with periodic drift correction.
 

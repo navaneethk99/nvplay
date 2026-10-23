@@ -47,6 +47,19 @@ sudo docker compose ps
 sudo docker compose logs --tail=100 signaling caddy
 ```
 
+After updating the source, rebuild and restart the signaling service so the
+shared protocol and embedded browser assets match the desktop app:
+
+```sh
+cd /home/nvplay/app/deploy/watch
+sudo docker compose build signaling
+sudo docker compose up -d --no-deps signaling
+```
+
+Direct playback requires the updated server as well as the desktop. An old
+server accepts legacy broadcast sessions but closes direct-session creation;
+`/direct.js` returning 404 is a useful check for an outdated deployment.
+
 To stop the VM from your Mac:
 
 ```sh

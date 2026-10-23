@@ -19,6 +19,7 @@ use std::{
 type ProcAddress<'a> = &'a dyn Fn(&CStr) -> *const c_void;
 
 pub struct VideoRenderer {
+    ambient: super::ambient::AmbientSampler,
     client: Arc<Client>,
     context: *mut c_void,
     gl: Arc<glow::Context>,
@@ -101,6 +102,7 @@ impl VideoRenderer {
             )
         };
         Ok(Self {
+            ambient: super::ambient::AmbientSampler::default(),
             client: player.client.clone(),
             context,
             gl,
@@ -111,6 +113,15 @@ impl VideoRenderer {
             max_render_ms: 0.0,
             error: None,
         })
+    }
+
+    pub(crate) fn ambient_palette(
+        &mut self,
+        enabled: bool,
+        generation: u64,
+    ) -> Option<super::VideoPalette> {
+        self.ambient.configure(enabled, generation);
+        self.ambient.palette
     }
 
     pub fn callback(renderer: Arc<Mutex<Option<Self>>>, rect: egui::Rect) -> egui::PaintCallback {
@@ -240,6 +251,13 @@ impl VideoRenderer {
             } else {
                 self.frames_reused += 1;
             }
+            self.ambient.sample(
+                &self.gl,
+                target.0,
+                width,
+                height,
+                resized || updates & 1 != 0,
+            );
             self.gl
                 .bind_framebuffer(glow::READ_FRAMEBUFFER, Some(target.0));
             self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, previous);
@@ -290,6 +308,7 @@ impl Drop for VideoRenderer {
             );
             (self.client.api.render_context_free)(self.context);
             self.delete_target();
+            self.ambient.destroy(&self.gl);
         }
     }
 }
@@ -411,6 +430,8 @@ pub(crate) mod tests {
         };
         let mut player = Player::create("libmpv", Some(audio), Some(&ctx)).unwrap();
         let mut renderer = VideoRenderer::create(&player, gl.clone(), &loader, &ctx).unwrap();
+        let ambient = std::env::var_os("NVPLAY_TEST_AMBIENT").is_some();
+        renderer.ambient_palette(ambient, 1);
         let media = std::env::var("NVPLAY_TEST_MEDIA").unwrap();
         player.load(&media).unwrap();
         // The destination is another FBO, replacing the normal window buffer.
@@ -527,6 +548,12 @@ pub(crate) mod tests {
             "too many GPU output drops: {}",
             player.state.dropped_frames
         );
+        if ambient {
+            assert!(
+                renderer.ambient.palette.is_some(),
+                "video never supplied theme colors"
+            );
+        }
         player.command(&["set", "pause", "yes"]).unwrap();
         let settle = Instant::now() + Duration::from_millis(300);
         while Instant::now() < settle {

@@ -193,7 +193,7 @@ impl PlayerApp {
                 .add_sized(
                     [ui.available_width(), 32.0],
                     egui::Button::new("End session")
-                        .fill(egui::Color32::from_rgb(145, 40, 40)),
+                        .fill(ui.visuals().selection.bg_fill),
                 )
                 .on_hover_text("Stop sharing, disconnect all viewers, and expire the viewing link. Your video keeps playing.")
                 .clicked()
@@ -284,7 +284,7 @@ impl PlayerApp {
                     }
                 }
                 if let Some(error) = &self.watch_party.error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
             });
     }
