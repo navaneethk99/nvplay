@@ -3,6 +3,7 @@
 const $ = id => document.getElementById(id);
 const video = $('video');
 const player = $('player');
+const social = new PartySocial({send: message => send(message), notify, showControls});
 let userMuted = false, hideTimer, toastTimer;
 let suspended = false, disconnectTimer, wakeLock;
 const room = location.pathname.split('/').pop();
@@ -22,7 +23,7 @@ const stamp = value => {
   const s = Math.max(0, Math.floor(value || 0));
   return s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 };
-function send(message) { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message)); }
+function send(message) { if (socket?.readyState !== WebSocket.OPEN) return false; socket.send(JSON.stringify(message)); return true; }
 function status(message) {
   if ($('status').textContent !== message) $('status').textContent = message;
   $('screen-status').textContent = message;
@@ -34,7 +35,7 @@ function notify(message) {
 function expanded() { return document.fullscreenElement === player || player.classList.contains('is-expanded'); }
 function showControls() {
   player.classList.remove('controls-hidden'); clearTimeout(hideTimer);
-  if (expanded() && controlsReady && state && !state.paused && !dragging && !$('shortcut-dialog').open) {
+  if (expanded() && controlsReady && state && !state.paused && !dragging && !$('shortcut-dialog').open && !social.isOpen) {
     hideTimer = setTimeout(() => {
       if (!$('controls').matches(':hover') && !player.querySelector(':focus-visible') && !state?.paused && !dragging) player.classList.add('controls-hidden');
     }, 3200);
@@ -96,6 +97,7 @@ function disposePeer() {
   for (const track of stream.getTracks()) { stream.removeTrack(track); track.stop(); }
 }
 function finish(message) {
+  social.ended();
   ended = true; wakeLock?.release().catch(() => {}); clearTimeout(reconnectTimer); enabled(false); disposePeer(); socket?.close();
   showControls(); $('overlay-description').hidden = true;
   $('overlay').hidden = false; $('overlay-text').textContent = message; $('join').hidden = true; status(message);
@@ -120,8 +122,9 @@ function connect() {
   status('Connecting to your friend…'); enabled(false); disposePeer();
   socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
   const connectionSocket = socket;
+  let accepted = false;
   messageQueue = Promise.resolve();
-  socket.onopen = () => { if (socket === connectionSocket) send({type: 'join', room, token, client_offers: true}); };
+  socket.onopen = () => { if (socket === connectionSocket) send({type: 'join', room, token, name: social.name, client_offers: true}); };
   socket.onmessage = event => {
     // Serialize async SDP handling so trickled candidates cannot overtake the offer.
     messageQueue = messageQueue.then(async () => {
@@ -129,6 +132,7 @@ function connect() {
       const message = JSON.parse(event.data);
       switch (message.type) {
         case 'joined':
+          accepted = true; social.joined(message);
           access = message.access;
           peerId = message.peer;
           if (message.media) {
@@ -165,6 +169,10 @@ function connect() {
             send({type: 'offer', peer: peerId, sdp: peer.localDescription.sdp});
           }
           break;
+        case 'peer_joined': social.peerJoined(message); break;
+        case 'peer_left': social.peerLeft(message); break;
+        case 'chat': social.received(message.entry); break;
+        case 'chat_rejected': social.rejected(message.message); break;
         case 'answer':
           if (peer && message.peer === peerId) {
             await peer.setRemoteDescription({type: 'answer', sdp: message.sdp});
@@ -198,19 +206,30 @@ function connect() {
           else if (peer?.connectionState === 'connected') status(accessStatus());
           break;
         case 'ended': finish('The host ended this watch party.'); break;
-        case 'error': finish(message.message); break;
+        case 'error':
+          if (accepted) finish(message.message);
+          else {
+            connectionSocket.onclose = null; connectionSocket.close(); socket = null;
+            social.rejectJoin(message.message); $('overlay').hidden = false;
+            $('overlay-text').textContent = 'Could not join the watch party';
+            $('join').hidden = false; $('join').textContent = 'Join watch party'; status(message.message);
+          }
+          break;
       }
     }).catch(() => { if (socket !== connectionSocket || ended || suspended) return; status('Could not establish the video connection. Reconnecting…'); connectionSocket.close(); });
   };
   socket.onerror = () => status('Connection interrupted. Reconnecting…');
   socket.onclose = () => {
     if (socket !== connectionSocket) return;
-    enabled(false); disposePeer();
+    social.disconnected(); enabled(false); disposePeer();
     if (!ended && !suspended) { status('Connection lost. Reconnecting…'); reconnectTimer = setTimeout(connect, 2000); }
   };
 }
-$('join').onclick = () => {
+$('join-form').onsubmit = event => { event.preventDefault(); $('join').click(); };
+$('join').onclick = event => {
+  event.preventDefault();
   if (!socket) {
+    if (!social.prepareJoin()) return;
     if (!token || !room) { finish('Open a complete viewing link in a supported browser.'); return; }
     // Unlock media playback during this user gesture, including on mobile Safari.
     video.play().catch(() => {}); $('overlay').hidden = true; connect();

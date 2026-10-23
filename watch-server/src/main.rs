@@ -1,6 +1,6 @@
-mod social;
 mod media_proxy;
 mod relay;
+mod social;
 use axum::{
     Json, Router,
     extract::{
@@ -191,7 +191,10 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
         } => {
             let name = match watch_protocol::display_name(&name) {
                 Ok(name) => name,
-                Err(error) => { reject(&mut socket, error).await; return; }
+                Err(error) => {
+                    reject(&mut socket, error).await;
+                    return;
+                }
             };
             let mut rooms = service.rooms.lock().await;
             let Some(session) = rooms
@@ -224,7 +227,11 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
             }
             let client_offers = client_offers && session.relay.is_some();
             let mut participants = session.participants();
-            participants.push(watch_protocol::Participant { peer: peer.clone(), name: name.clone(), host: false });
+            participants.push(watch_protocol::Participant {
+                peer: peer.clone(),
+                name: name.clone(),
+                host: false,
+            });
             let _ = tx.try_send(Message::Joined {
                 participants,
                 history: session.chat.snapshot(),
@@ -271,7 +278,16 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
                     media,
                 },
             );
-            session.broadcast(Message::PeerJoined { peer: peer.clone(), name });
+            let notice = Message::PeerJoined {
+                peer: peer.clone(),
+                name,
+            };
+            let _ = session.host.try_send(notice.clone());
+            for (id, viewer) in &session.viewers {
+                if id != &peer {
+                    let _ = viewer.tx.try_send(notice.clone());
+                }
+            }
             (room, Some(peer))
         }
         _ => {
@@ -388,7 +404,9 @@ async fn session(service: Arc<Service>, mut socket: WebSocket) {
         if let Some(room) = rooms.get_mut(&room_id) {
             if let Some(viewer) = room.viewers.remove(&peer) {
                 room.broadcast(Message::PeerLeft { peer });
-                if let Some(media) = viewer.media { media.close().await; }
+                if let Some(media) = viewer.media {
+                    media.close().await;
+                }
             }
         }
     } else if let Some(room) = rooms.remove(&room_id) {
@@ -444,6 +462,7 @@ fn app(service: Arc<Service>) -> Router {
         }))
         .route("/admin/activity", get(activity))
         .route("/admin/idle", post(claim_idle))
+        .route("/social.js", get(|| async { ([("content-type", "text/javascript; charset=utf-8")], include_str!("../web/social.js")) }))
         .route("/watch/{room}", get(|| async { Html(include_str!("../web/index.html")) }))
         .route("/direct.js", get(|| async { ([("content-type", "text/javascript; charset=utf-8")], include_str!("../web/direct.js")) }))
         .route("/hls.js", get(|| async { ([("content-type", "text/javascript; charset=utf-8")], include_str!("../web/vendor/hls-1.6.16.min.js")) }))
@@ -560,7 +579,7 @@ mod tests {
         service.rooms.lock().await.insert(
             "room".into(),
             Room {
-                    chat: social::ChatHistory::default(),
+                chat: social::ChatHistory::default(),
                 media_assets: HashMap::new(),
                 media: None,
                 token: secret(),
@@ -713,6 +732,20 @@ mod tests {
             .unwrap()
             .to_owned();
         let token = invite.fragment().unwrap().to_owned();
+        let (mut nameless, _) = connect_async(&endpoint).await.unwrap();
+        send(
+            &mut nameless,
+            Message::Join {
+                name: "  ".into(),
+                room: room.clone(),
+                token: token.clone(),
+                client_offers: false,
+            },
+        )
+        .await;
+        assert!(
+            matches!(receive(&mut nameless).await, Message::Error { message } if message.contains("name"))
+        );
         let (mut bad, _) = connect_async(&endpoint).await.unwrap();
         send(
             &mut bad,
@@ -732,7 +765,7 @@ mod tests {
             send(
                 &mut viewer,
                 Message::Join {
-                name: "Test viewer".into(),
+                    name: "Test viewer".into(),
                     client_offers: false,
                     room: room.clone(),
                     token: token.clone(),
@@ -746,9 +779,87 @@ mod tests {
                 receive(&mut host).await,
                 Message::PeerJoined { .. }
             ));
+            for previous in &mut viewers {
+                assert!(matches!(
+                    receive(previous).await,
+                    Message::PeerJoined { .. }
+                ));
+            }
             ids.push(peer);
             viewers.push(viewer);
         }
+        // Chat identities come from the authenticated connection, never the payload.
+        send(
+            &mut viewers[0],
+            Message::ChatSend {
+                text: "Hello <script>🎬</script>".into(),
+            },
+        )
+        .await;
+        let Message::Chat { entry } = receive(&mut host).await else {
+            panic!("chat not delivered to host")
+        };
+        assert_eq!(entry.sender.peer, ids[0]);
+        assert_eq!(entry.sender.name, "Test viewer");
+        assert!(!entry.sender.host);
+        for viewer in &mut viewers {
+            assert!(
+                matches!(receive(viewer).await, Message::Chat { entry: actual } if actual == entry)
+            );
+        }
+        send(
+            &mut host,
+            Message::ChatSend {
+                text: "Hello from Host".into(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(receive(&mut host).await, Message::Chat { entry } if entry.sender.host && entry.sender.peer == watch_protocol::HOST_PEER)
+        );
+        for viewer in &mut viewers {
+            assert!(matches!(receive(viewer).await, Message::Chat { entry } if entry.sender.host));
+        }
+        send(
+            &mut viewers[0],
+            Message::ChatSend {
+                text: "x".repeat(501),
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut viewers[0]).await,
+            Message::ChatRejected { .. }
+        ));
+        // Another authenticated room must not receive this room's chat.
+        let (mut other_host, _) = connect_async(&endpoint).await.unwrap();
+        send(
+            &mut other_host,
+            Message::Create {
+                media: None,
+                key: "host-secret".into(),
+                access: Access::default(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut other_host).await,
+            Message::Created { .. }
+        ));
+        send(
+            &mut viewers[1],
+            Message::ChatSend {
+                text: "Only this room".into(),
+            },
+        )
+        .await;
+        assert!(matches!(receive(&mut host).await, Message::Chat { .. }));
+        for viewer in &mut viewers {
+            assert!(matches!(receive(viewer).await, Message::Chat { .. }));
+        }
+        send(&mut other_host, Message::Ping).await;
+        assert!(matches!(receive(&mut other_host).await, Message::Pong));
+        send(&mut other_host, Message::Ended).await;
         // A viewer cannot impersonate another participant in signaling messages.
         send(
             &mut viewers[0],

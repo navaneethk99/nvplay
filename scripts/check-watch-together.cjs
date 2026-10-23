@@ -46,7 +46,7 @@ async function waitFor(check, timeout = 30000) {
     for (let i = 0; i < Math.min(5, Number(process.env.NVPLAY_WATCH_VIEWERS || 2)); i++) {
       const page = await viewerPage(i);
       page.on('pageerror', error => console.error('Viewer error:', error.message));
-      await page.goto(invite, {waitUntil: "domcontentloaded"}); await page.locator('#join').click();
+      await page.goto(invite, {waitUntil: "domcontentloaded"}); await page.locator('#display-name').fill(`Test viewer ${i + 1}`); await page.locator('#join').click();
       await page.waitForFunction(() => peer?.connectionState === 'connected', {timeout: 30000});
       if (i === 0 && process.env.NVPLAY_WATCH_TEST_START_PAUSED === '1') {
         await page.waitForFunction(() => state?.paused && !$('play').disabled);
@@ -55,6 +55,20 @@ async function waitFor(check, timeout = 30000) {
       await page.waitForFunction(() => document.querySelector('video').getVideoPlaybackQuality().totalVideoFrames > 10, {timeout: 30000});
       pages.push(page);
     }
+    await pages[0].locator('#chat-toggle').click();
+    await pages[0].locator('#chat-input').fill('Hello from the browser 🎬');
+    await pages[0].locator('#chat-send').click();
+    await waitFor(() => {
+      try {
+        const state = JSON.parse(fs.readFileSync(path.join(dir, 'social-state.json'), 'utf8'));
+        return state.messages.some(m => m.text === 'Hello from the browser 🎬' && m.sender.name === 'Test viewer 1') && state.notices.some(n => n.includes('Test viewer 1 joined'));
+      } catch { return false; }
+    });
+    fs.writeFileSync(path.join(dir, 'send-chat'), 'Hello from the desktop app');
+    for (const page of pages) await page.waitForFunction(() => social.messages.some(m => m.text === 'Hello from the desktop app' && m.sender.host));
+    if (process.env.NVPLAY_WATCH_SCREENSHOT) await pages[0].screenshot({path: process.env.NVPLAY_WATCH_SCREENSHOT.replace('.png', '-chat.png'), fullPage: true});
+    await pages[0].locator('#chat-close').click();
+    console.log('Desktop host received named joins and browser chat; desktop replies reached every browser.');
     const hostState = JSON.parse(fs.readFileSync(path.join(dir, 'host-state.json'), 'utf8'));
     for (const page of pages) {
       const size = await page.evaluate(() => ({width: video.videoWidth, height: video.videoHeight}));
@@ -154,7 +168,7 @@ async function waitFor(check, timeout = 30000) {
     console.log('Fullscreen play/pause and seeking to 45 seconds verified.');
     await pages[0].locator('#fullscreen').click();
     await pages[0].waitForFunction(() => !document.fullscreenElement && !player.classList.contains('is-expanded'));
-    const late = await viewerPage(2); await late.goto(invite, {waitUntil: 'domcontentloaded'}); await late.locator('#join').click();
+    const late = await viewerPage(2); await late.goto(invite, {waitUntil: 'domcontentloaded'}); await late.locator('#display-name').fill('Test viewer'); await late.locator('#join').click();
     await late.waitForFunction(() => state?.paused && state.position >= 44 && document.querySelector('video').getVideoPlaybackQuality().totalVideoFrames >= 1);
     console.log('A third viewer joined while paused and decoded the still frame.');
     await late.close();
@@ -204,14 +218,14 @@ async function waitFor(check, timeout = 30000) {
     await sleep(1000);
     const afterDenied = await pages[1].evaluate(() => ({position: state.position, paused: state.paused}));
     if (afterDenied.paused || afterDenied.position < beforeDenied - 0.2) throw Error('Denied controls changed host playback');
-    const locked = await viewerPage(3); await locked.goto(invite); await locked.locator('#join').click();
+    const locked = await viewerPage(3); await locked.goto(invite); await locked.locator('#display-name').fill('Test viewer'); await locked.locator('#join').click();
     await locked.waitForFunction(() => $('status').textContent.includes('locked')); await locked.close();
     fs.writeFileSync(path.join(dir, 'restore-access'), 'restore');
     for (const page of pages) await page.waitForFunction(() => !$('play').disabled && !$('seek').disabled && access.allow_join === true);
     console.log('Live viewer permissions, forged-command rejection, and locked invitations verified.');
     fs.writeFileSync(path.join(dir, 'end-session'), 'end');
     for (const page of pages) await page.waitForFunction(() => document.querySelector('#status').textContent.includes('ended'));
-    const expired = await browser.newPage(); await expired.goto(invite, {waitUntil: "domcontentloaded"}); await expired.locator('#join').click();
+    const expired = await browser.newPage(); await expired.goto(invite, {waitUntil: "domcontentloaded"}); await expired.locator('#display-name').fill('Test viewer'); await expired.locator('#join').click();
     await expired.waitForFunction(() => document.querySelector('#status').textContent.includes('expired'));
     console.log('Ending the host session disconnected both viewers and revoked the link.');
     fs.writeFileSync(path.join(dir, 'done'), 'ok');

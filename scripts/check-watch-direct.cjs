@@ -38,12 +38,13 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     browser = await chromium.launch({headless: true, ...(process.env.NVPLAY_CHROME ? {executablePath: process.env.NVPLAY_CHROME} : {}), args: ['--autoplay-policy=no-user-gesture-required']});
     async function room(media) {
       const socket = new WebSocket(`${origin.replace('http', 'ws')}/ws`); sockets.push(socket);
-      const session = {state: {position: 10, duration: 60, paused: true, buffering: false, speed: 1, title: 'Direct playback test'}, at: Date.now(), controls: []};
+      const session = {state: {position: 10, duration: 60, paused: true, buffering: false, speed: 1, title: 'Direct playback test'}, at: Date.now(), controls: [], messages: [], sendChat: text => socket.send(JSON.stringify({type: "chat_send", text}))};
       const created = new Promise((resolve, reject) => {
         socket.onopen = () => socket.send(JSON.stringify({type: 'create', key: '', media}));
         socket.onerror = reject;
         socket.onmessage = event => {
           const message = JSON.parse(event.data);
+          session.messages.push(message);
           if (message.type === 'created') resolve(message.url);
           if (message.type === 'control') {
             session.controls.push(message.control);
@@ -64,15 +65,44 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       session.access = access => socket.send(JSON.stringify({type: 'access', access}));
       return session;
     }
+    let viewerNumber = 0;
     async function join(session, setup) {
       const page = await browser.newPage();
       page.on('pageerror', error => { throw error; });
       if (setup) await setup(page);
-      await page.goto(session.url); await page.locator('#join').click();
+      await page.goto(session.url);
+      await page.locator('#join').click();
+      assert.equal(await page.evaluate(() => socket === undefined), true, 'Blank names must not connect');
+      await page.locator('#display-name').fill(`Viewer ${++viewerNumber}`);
+      await page.locator('#join').click();
+      await page.waitForFunction(() => social.connected);
       return page;
     }
     const session = await room({kind: 'url', url: `${mediaOrigin}/movie.mp4`});
     const a = await join(session), b = await join(session);
+    await a.waitForFunction(() => $('toast').textContent.includes('Viewer 2 joined'));
+    await b.locator('#chat-toggle').click();
+    const chatText = '<img src=x onerror=alert(1)> Hello 🎬';
+    await b.locator('#chat-input').fill(chatText);
+    await b.locator('#chat-input').press('Enter');
+    await a.waitForFunction(() => social.unread === 1);
+    await b.waitForFunction(() => !social.pending);
+    assert.equal(session.messages.find(m => m.type === 'chat').entry.sender.name, 'Viewer 2');
+    await a.locator('#chat-toggle').click();
+    assert.equal(await a.locator('#chat-messages img').count(), 0, 'Chat must render as plain text');
+    assert((await a.locator('#chat-messages').textContent()).includes(chatText));
+    session.sendChat('Hello from the host');
+    await a.waitForFunction(() => social.messages.length === 2);
+    await b.waitForFunction(() => social.messages.length === 2);
+    const lateChat = await join(session);
+    assert.equal(await lateChat.evaluate(() => social.messages.length), 2, 'Late joiners receive recent chat');
+    assert.equal(await lateChat.evaluate(() => social.participants.size), 4);
+    await lateChat.close();
+    await a.waitForFunction(() => social.participants.size === 3);
+    await a.locator('#chat-close').click();
+    await b.locator('#chat-close').click();
+    console.log('Names, join notices, participants, host/browser chat, late history, unread badges and plain-text rendering passed.');
+
     for (const page of [a, b]) {
       await page.waitForFunction(() => controlsReady && video.readyState >= 2 && Math.abs(video.currentTime - 10) < .25);
       assert.equal(await page.evaluate(() => peer), null);

@@ -5,7 +5,8 @@ use watch_protocol::{Control, Playback};
 
 pub(super) struct WatchParty {
     pub(super) access: watch_protocol::Access,
-    host: Option<Host>,
+    pub(super) host: Option<Host>,
+    pub(super) social: super::party_social::Social,
     endpoint: String,
     key: String,
     url: String,
@@ -25,6 +26,7 @@ impl Default for WatchParty {
         Self {
             access: Default::default(),
             host: None,
+            social: Default::default(),
             endpoint: std::env::var("NVPLAY_WATCH_URL")
                 .unwrap_or(saved)
                 .trim()
@@ -55,6 +57,7 @@ impl WatchParty {
         self.url.clear();
         self.viewers = 0;
         self.source.clear();
+        self.social = Default::default();
     }
 }
 impl PlayerApp {
@@ -157,6 +160,10 @@ impl PlayerApp {
                 Event::Status(status) => self.watch_party.status = status,
                 Event::Created(url) => self.watch_party.url = url,
                 Event::Viewers(count) => self.watch_party.viewers = count,
+                Event::PeerJoined { peer, name } => self.watch_party.social.joined(peer, name),
+                Event::PeerLeft(peer) => self.watch_party.social.left(&peer),
+                Event::Chat(entry) => self.watch_party.social.received(entry),
+                Event::ChatRejected(message) => self.watch_party.social.rejected(message),
                 Event::Control(control) => match control {
                     Control::Play {} => self.command(&["set", "pause", "no"]),
                     Control::Pause {} => self.command(&["set", "pause", "yes"]),
@@ -237,6 +244,7 @@ impl PlayerApp {
                             self.watch_party.viewers,
                             watch_protocol::MAX_VIEWERS
                         ));
+                        self.party_participants_ui(ui);
                     }
 
                 } else {
@@ -357,6 +365,18 @@ mod tests {
                 app.watch_party.access = Default::default();
             }
             app.poll_watch_party();
+            if let Ok(text) = std::fs::read_to_string(dir.join("send-chat")) {
+                if let Some(host) = &app.watch_party.host {
+                    host.send_chat(&text).unwrap();
+                }
+                std::fs::remove_file(dir.join("send-chat")).unwrap();
+            }
+            std::fs::write(
+                dir.join("social-state.json"),
+                app.watch_party.social.snapshot().to_string(),
+            )
+            .unwrap();
+
             if state_second != started.elapsed().as_secs() {
                 state_second = started.elapsed().as_secs();
                 if let Some(player) = &app.player {

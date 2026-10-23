@@ -70,12 +70,17 @@ pub enum Event {
     Created(String),
     Status(String),
     Viewers(usize),
+    PeerJoined { peer: String, name: String },
+    PeerLeft(String),
+    Chat(watch_protocol::ChatEntry),
+    ChatRejected(String),
     Control(Control),
     Error(String),
     Closed,
 }
 pub struct Host {
     snapshots: tokio::sync::watch::Sender<Snapshot>,
+    chat: tokio::sync::mpsc::Sender<String>,
     events: mpsc::Receiver<Event>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -99,6 +104,7 @@ impl Host {
         if !snapshot.video && !snapshot.audio {
             return Err("This media has no shareable audio or video track.".into());
         }
+        let (chat, chat_rx) = tokio::sync::mpsc::channel(16);
         let (snapshots, receiver) = tokio::sync::watch::channel(snapshot);
         let (events, event_rx) = mpsc::sync_channel(64);
         let (shutdown, stopped) = tokio::sync::oneshot::channel();
@@ -118,6 +124,7 @@ impl Host {
                             ffmpeg,
                             media,
                             receiver,
+                            chat_rx,
                             stopped,
                             emit.clone(),
                         )) {
@@ -133,8 +140,15 @@ impl Host {
             .map_err(|_| "Could not start the sharing worker")?;
         Ok(Self {
             snapshots,
+            chat,
             events: event_rx,
             shutdown: Some(shutdown),
+        })
+    }
+    pub fn send_chat(&self, text: &str) -> Result<(), String> {
+        let text = watch_protocol::chat_text(text).map_err(str::to_owned)?;
+        self.chat.try_send(text).map_err(|_| {
+            "Chat is unavailable. Wait for the session to connect and try again.".into()
         })
     }
     pub fn update(&self, snapshot: Snapshot) {

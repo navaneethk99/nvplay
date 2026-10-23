@@ -356,7 +356,7 @@ impl Relay {
                 if state == webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState::Connected
                     && !notified.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     // Trigger a fresh still frame only once this viewer can receive it.
-                    let _ = tx.send(Message::PeerJoined { peer }).await;
+                    let _ = tx.send(Message::PeerJoined { peer, name: String::new() }).await;
                 }
             })
         }));

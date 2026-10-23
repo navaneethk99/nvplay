@@ -99,11 +99,6 @@ impl Entry {
         self.key = key.into();
         self
     }
-    fn shift_key(mut self, key: &str) -> Self {
-        self.key = key.into();
-        self.shift = true;
-        self
-    }
     fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
@@ -124,6 +119,7 @@ struct Group {
 }
 pub(super) struct NativeMenu {
     _root: Retained<NSMenu>,
+    settings_item: Option<Retained<NSMenuItem>>,
     groups: Vec<Group>,
     inbox: Arc<Inbox>,
 }
@@ -214,6 +210,7 @@ impl NativeMenu {
         app.setMainMenu(Some(&root));
         let mut result = Self {
             _root: root,
+            settings_item: None,
             groups,
             inbox: Arc::new(Inbox {
                 actions: Mutex::new(Vec::new()),
@@ -226,7 +223,7 @@ impl NativeMenu {
         populate(
             &group.menu,
             &[
-                Entry::item("Settings…", Action::Settings).key(","),
+                Entry::item("Settings…", Action::Settings),
                 Entry::separator(),
                 updates,
                 Entry::separator(),
@@ -236,6 +233,7 @@ impl NativeMenu {
             &mut group.handlers,
             mtm,
         );
+        result.settings_item = group.menu.itemWithTitle(&NSString::from_str("Settings…"));
         result
     }
     fn take(&self) -> Vec<Action> {
@@ -309,7 +307,15 @@ impl PlayerApp {
             self.menu_action(action);
         }
         let entries = self.native_entries();
+        let settings_title = self.key_bindings.hint(
+            super::key_bindings::Action::Settings,
+            "Settings…",
+            &self.ctx,
+        );
         if let Some(menu) = &mut self.native_menu {
+            if let Some(item) = &menu.settings_item {
+                item.setTitle(&NSString::from_str(&settings_title));
+            }
             menu.sync(entries);
         }
     }
@@ -380,17 +386,11 @@ impl PlayerApp {
         } else {
             devices
         };
-        vec![
+        let mut groups = vec![
             vec![
-                Entry::item("Open File…", Open)
-                    .key("o")
-                    .enabled(available && !self.dialog_busy),
-                Entry::item("Open Network Stream…", Network)
-                    .key("n")
-                    .enabled(available),
-                Entry::item("Search Movies…", SearchMovies)
-                    .shift_key("m")
-                    .enabled(available),
+                Entry::item("Open File…", Open).enabled(available && !self.dialog_busy),
+                Entry::item("Open Network Stream…", Network).enabled(available),
+                Entry::item("Search Movies…", SearchMovies).enabled(available),
             ],
             vec![
                 Entry::item(
@@ -450,9 +450,7 @@ impl PlayerApp {
                     .enabled(available),
             ],
             vec![
-                Entry::item("Playlist", Playlist)
-                    .key("l")
-                    .checked(self.show_playlist),
+                Entry::item("Playlist", Playlist).checked(self.show_playlist),
                 Entry::item("Playback information", Info).checked(self.show_info),
                 Entry::item("History", History)
                     .checked(self.show_playlist && self.sidebar_tab == super::SidebarTab::History),
@@ -464,7 +462,40 @@ impl PlayerApp {
                 Entry::item("Automatically Install Updates", AutomaticUpdates)
                     .checked(self.updates.automatic),
             ],
-        ]
+        ];
+        // egui dispatches configurable keys so capture and text-entry guards apply
+        // equally to native menus and player controls.
+        for entry in groups.iter_mut().flatten() {
+            use super::key_bindings::Action as BindingAction;
+            let action = match entry.action.as_ref() {
+                Some(Open) => Some(BindingAction::Open),
+                Some(Network) => Some(BindingAction::Network),
+                Some(SearchMovies) => Some(BindingAction::SearchMovies),
+                Some(Pause) => Some(BindingAction::Pause),
+                Some(Stop) => Some(BindingAction::Stop),
+                Some(Previous) => Some(BindingAction::Previous),
+                Some(Next) => Some(BindingAction::Next),
+                Some(Repeat) => Some(BindingAction::Repeat),
+                Some(Mute) => Some(BindingAction::Mute),
+                Some(Fullscreen) => Some(BindingAction::Fullscreen),
+                Some(Playlist) => Some(BindingAction::Playlist),
+                Some(History) => Some(BindingAction::History),
+                Some(Info) => Some(BindingAction::Info),
+                Some(AudioSettings) => Some(BindingAction::AudioSettings),
+                Some(Subtitle) => Some(BindingAction::AddSubtitle),
+                Some(DownloadSubtitle) => Some(BindingAction::DownloadSubtitle),
+                Some(SubtitleAppearance) => Some(BindingAction::SubtitleAppearance),
+                Some(Help) => Some(BindingAction::Help),
+                _ => None,
+            };
+            if let Some(action) = action {
+                let label = self.key_bindings.label(action, &self.ctx);
+                if label != "Unassigned" {
+                    entry.title = format!("{}    {label}", entry.title);
+                }
+            }
+        }
+        groups
     }
 }
 
@@ -498,8 +529,13 @@ mod tests {
         let entries = app.native_entries();
         assert!(!entries[0][0].enabled);
         assert!(!entries[0][1].enabled);
-        assert_eq!(entries[0][2].key, "m");
-        assert!(entries[0][2].shift);
+        assert!(entries[0][2].key.is_empty());
+        assert!(
+            entries[0][2].title.contains(
+                &app.key_bindings
+                    .label(super::super::key_bindings::Action::SearchMovies, &ctx)
+            )
+        );
         assert_eq!(entries[0][2].action, Some(Action::SearchMovies));
         assert!(!entries[1][0].enabled);
         assert_eq!(entries[4][0].title, "Download Subtitle…");

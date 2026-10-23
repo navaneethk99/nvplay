@@ -14,6 +14,7 @@ pub(super) async fn run(
     key: String,
     media: Media,
     mut snapshots: watch::Receiver<Snapshot>,
+    mut chat: tokio::sync::mpsc::Receiver<String>,
     mut stopped: oneshot::Receiver<()>,
     emit: Emitter,
 ) -> Result<(), String> {
@@ -47,6 +48,7 @@ pub(super) async fn run(
         loop {
             tokio::select! {
                 _ = &mut stopped => break,
+                Some(text) = chat.recv(), if created => { send(&mut socket, Message::ChatSend { text }).await?; }
                 _ = &mut deadline, if !created => return Err("The watch service did not create a session".into()),
                 changed = snapshots.changed() => {
                     if changed.is_err() { break; }
@@ -71,9 +73,11 @@ pub(super) async fn run(
                                     emit.send(Event::Created(url));
                                     emit.send(Event::Status("Direct playback · controls synchronized with your device".into()));
                                 }
-                                Message::PeerJoined { peer } => { viewers.insert(peer); emit.send(Event::Viewers(viewers.len())); }
-                                Message::PeerLeft { peer } => { viewers.remove(&peer); emit.send(Event::Viewers(viewers.len())); }
+                                Message::PeerJoined { peer, name } => { if viewers.insert(peer.clone()) { emit.send(Event::PeerJoined { peer, name }); } emit.send(Event::Viewers(viewers.len())); }
+                                Message::PeerLeft { peer } => { viewers.remove(&peer); emit.send(Event::PeerLeft(peer)); emit.send(Event::Viewers(viewers.len())); }
                                 Message::Control { control } if control.valid() && snapshot.access.permits(&control) => emit.send(Event::Control(control)),
+                                Message::Chat { entry } => emit.send(Event::Chat(entry)),
+                                Message::ChatRejected { message } => emit.send(Event::ChatRejected(message)),
                                 Message::Error { message } => return Err(message),
                                 Message::Ended => break,
                                 _ => {}
@@ -133,6 +137,7 @@ mod tests {
             ctx: eframe::egui::Context::default(),
         };
         let expected = media.clone();
+        let (chat_tx, chat_rx) = tokio::sync::mpsc::channel(16);
         let task = tokio::spawn(async move {
             // No FFmpeg path exists or is required for this mode.
             super::super::host::run(
@@ -141,6 +146,7 @@ mod tests {
                 None,
                 Some(media),
                 rx,
+                chat_rx,
                 stopped,
                 emit,
             )
@@ -181,6 +187,7 @@ mod tests {
         send(
             &mut socket,
             Message::PeerJoined {
+                name: "Alex".into(),
                 peer: "viewer".into(),
             },
         )
@@ -200,6 +207,48 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }).await.unwrap();
+        chat_tx.send("Hello from desktop".into()).await.unwrap();
+        loop {
+            if let Message::ChatSend { text } = receive(&mut socket).await {
+                assert_eq!(text, "Hello from desktop");
+                break;
+            }
+        }
+        send(
+            &mut socket,
+            Message::Chat {
+                entry: watch_protocol::ChatEntry {
+                    id: 1,
+                    sender: watch_protocol::Participant {
+                        peer: "viewer".into(),
+                        name: "Alex".into(),
+                        host: false,
+                    },
+                    text: "Hello desktop".into(),
+                    sent_at: 0,
+                },
+            },
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                events.extend(event_rx.try_iter());
+                if events
+                    .iter()
+                    .any(|e| matches!(e, Event::Chat(entry) if entry.text == "Hello desktop"))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::PeerJoined { name, .. } if name == "Alex"))
+        );
         let mut updated = snapshot;
         updated.access.seek = false;
         snapshots.send(updated).unwrap();

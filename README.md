@@ -23,6 +23,16 @@ times per second while selected, works with local files and streams, and keeps
 text readable over dark surfaces. Ribbons pause with playback; idle and audio-only
 playback use a calm fallback palette. Video pixels remain unchanged.
 
+## Key bindings
+
+Open **Settings → Key Bindings** to view all player shortcuts, including actions
+that start unassigned. Click a shortcut and press the new key combination;
+changes apply immediately and persist across launches. Duplicate assignments
+show the action already using that shortcut. Use **Clear** to remove a binding,
+**Cancel** to stop recording, or **Reset all to defaults** to restore the defaults.
+Help, menu labels, and control tooltips follow your assignments. Escape continues
+to close dialogs; its fullscreen shortcut can be changed separately.
+
 ## Audio settings
 
 Open **Settings → Audio**, or choose **Audio → Audio Settings…**. Select an audio
@@ -141,6 +151,15 @@ The app discovers tools beside the executable, in a macOS bundle's `Contents/Res
 **Netflix does not play here.** Its streams require account authentication and DRM through a [Netflix-supported browser or app](https://help.netflix.com/en/node/30081). Netflix links show an explicit explanation in the URL dialog. Other DRM services are also unsupported. Private, age-restricted, region-locked, or expired videos may fail; the app does not read your browser cookies or sign in to websites. Errors include recent engine/extractor diagnostics, and Stop cancels a pending stream. Website support depends on the current extractor and service, so arbitrary URLs cannot be guaranteed. A JavaScript-only watch page may have no extractable video in its HTML and needs a site-specific extractor. Unsupported pages report **Website not supported** with the extractor reason; follow-on errors about the internal `ytdl://` URL are suppressed.
 
 ### Watch together over the internet
+
+Viewers choose a display name before joining. The desktop host and other viewers
+see a small notification when someone joins. Open **Chat** in the browser or
+**Watch together → Open chat** in the app to message everyone in the session.
+The participant list shows who is watching. The most recent 40 messages are
+available to new joiners; messages are limited to 500 characters and are kept
+only in the current server session. Names and messages are displayed as plain
+text. Rebuild the desktop app and redeploy the watch server together for this
+protocol update.
 
 Open the **Watch together** sidebar to create a browser viewing link for up to
 six friends. The desktop owns the shared timeline and controls who can play,
@@ -325,8 +344,11 @@ playback resumes at the saved time.
 - Accessible buttons/sliders and keyboard shortcuts.
 - Asynchronous playback commands and visible playback/load errors.
 
+Default bindings (editable in **Settings → Key Bindings**):
+
 | Shortcut | Action |
 | --- | --- |
+| Ctrl/Cmd + , | Settings |
 | Ctrl/Cmd + O | Open files |
 | Ctrl/Cmd + N | Open network stream |
 | Ctrl/Cmd + Shift + M | Search and play movies |

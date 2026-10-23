@@ -4,9 +4,11 @@ mod audio_settings;
 mod history_artwork;
 mod history_panel;
 mod icons;
+mod key_bindings;
 mod movie_search;
 #[cfg(target_os = "macos")]
 mod native_menu;
+mod party_social;
 mod posters;
 mod preview;
 mod settings_panel;
@@ -103,6 +105,7 @@ pub struct PlayerApp {
     show_settings: bool,
     settings_tab: settings_panel::SettingsTab,
     audio_settings: audio_settings::AudioSettings,
+    key_bindings: key_bindings::KeyBindings,
     appearance: appearance::Theme,
     video_aurora: video_aurora::VideoAurora,
     appearance_error: Option<String>,
@@ -205,6 +208,7 @@ impl PlayerApp {
             show_settings: false,
             settings_tab: settings_panel::SettingsTab::default(),
             audio_settings: audio_settings::AudioSettings::default(),
+            key_bindings: key_bindings::KeyBindings::load(),
             appearance,
             video_aurora: video_aurora::VideoAurora::default(),
             appearance_error,
@@ -434,13 +438,19 @@ impl PlayerApp {
         }
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Comma)) {
+        use key_bindings::Action;
+        if self.key_bindings.capturing.is_some() {
+            if self.show_settings && self.settings_tab == settings_panel::SettingsTab::KeyBindings {
+                self.capture_key_binding(ctx);
+                return;
+            }
+            self.key_bindings.capturing = None;
+        }
+        if self.key_bindings.global_pressed(ctx, Action::Settings) {
             self.open_settings();
             return;
         }
-        if ctx
-            .input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::M))
-        {
+        if self.key_bindings.global_pressed(ctx, Action::SearchMovies) {
             self.open_movie_search();
             return;
         }
@@ -457,6 +467,10 @@ impl PlayerApp {
                 self.show_url = false;
                 return;
             }
+            if self.watch_party.social.open {
+                self.watch_party.social.open = false;
+                return;
+            }
             if self.show_settings {
                 self.show_settings = false;
                 return;
@@ -469,10 +483,6 @@ impl PlayerApp {
                 self.show_info = false;
                 return;
             }
-            if self.fullscreen && !egui::Popup::is_any_open(ctx) {
-                self.toggle_fullscreen(ctx);
-                return;
-            }
         }
         if ctx.wants_keyboard_input()
             || self.show_url
@@ -483,32 +493,26 @@ impl PlayerApp {
         {
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::O)) {
-            self.pick(false);
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::N)) {
-            self.show_url = true;
-        }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::L)) {
-            self.show_playlist = !self.show_playlist;
-        }
-        for (key, action) in [
-            (Key::Space, 0),
-            (Key::ArrowLeft, 1),
-            (Key::ArrowRight, 2),
-            (Key::F, 3),
-            (Key::M, 4),
-            (Key::ArrowUp, 5),
-            (Key::ArrowDown, 6),
-        ] {
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+        for action in Action::ALL {
+            if matches!(action, Action::Settings | Action::SearchMovies) {
+                continue;
+            }
+            if self.key_bindings.pressed(ctx, action) {
                 match action {
-                    0 => self.toggle_pause(),
-                    1 => self.command(&["seek", "-5", "relative+exact"]),
-                    2 => self.command(&["seek", "5", "relative+exact"]),
-                    3 => self.toggle_fullscreen(ctx),
-                    4 => self.toggle_mute(),
-                    5 | 6 => {
+                    Action::Open => self.pick(false),
+                    Action::Network => self.show_url = true,
+                    Action::Playlist => self.show_playlist = !self.show_playlist,
+                    Action::Pause => self.toggle_pause(),
+                    Action::SeekBackward => self.command(&["seek", "-5", "relative+exact"]),
+                    Action::SeekForward => self.command(&["seek", "5", "relative+exact"]),
+                    Action::Fullscreen => self.toggle_fullscreen(ctx),
+                    Action::LeaveFullscreen
+                        if self.fullscreen && !egui::Popup::is_any_open(ctx) =>
+                    {
+                        self.toggle_fullscreen(ctx)
+                    }
+                    Action::Mute => self.toggle_mute(),
+                    Action::VolumeUp | Action::VolumeDown => {
                         let volume =
                             self.pending_volume
                                 .map(|pending| pending.0)
@@ -516,11 +520,30 @@ impl PlayerApp {
                                     self.player.as_ref().map_or(100.0, |p| p.state.volume)
                                 });
                         self.set_volume(
-                            (volume + if action == 5 { 5.0 } else { -5.0 }).clamp(0.0, 100.0),
+                            (volume
+                                + if action == Action::VolumeUp {
+                                    5.0
+                                } else {
+                                    -5.0
+                                })
+                            .clamp(0.0, 100.0),
                         );
                     }
+                    Action::Stop => self.stop(),
+                    Action::Previous => self.previous(),
+                    Action::Next => self.next(),
+                    Action::Repeat => self.repeat = !self.repeat,
+                    Action::History => self.open_history(),
+                    Action::Info => self.show_info = !self.show_info,
+                    Action::AudioSettings => self.open_audio_settings(),
+                    Action::AddSubtitle => self.pick(true),
+                    Action::DownloadSubtitle => self.open_subtitle_search(),
+                    Action::SubtitleAppearance => self.open_subtitle_controls(),
+                    Action::ToggleSubtitles => self.command(&["cycle", "sub-visibility"]),
+                    Action::Help => self.show_help = true,
                     _ => {}
                 }
+                break;
             }
         }
     }
@@ -556,7 +579,9 @@ impl PlayerApp {
                 if ui
                     .add_enabled(
                         !self.dialog_busy && self.player.is_some(),
-                        egui::Button::new("Open File…").shortcut_text("Ctrl/Cmd+O"),
+                        egui::Button::new("Open File…").shortcut_text(
+                            self.key_bindings.label(key_bindings::Action::Open, &ctx),
+                        ),
                     )
                     .clicked()
                 {
@@ -566,7 +591,9 @@ impl PlayerApp {
                 if ui
                     .add_enabled(
                         self.player.is_some(),
-                        egui::Button::new("Open Network Stream…").shortcut_text("Ctrl/Cmd+N"),
+                        egui::Button::new("Open Network Stream…").shortcut_text(
+                            self.key_bindings.label(key_bindings::Action::Network, &ctx),
+                        ),
                     )
                     .clicked()
                 {
@@ -576,7 +603,10 @@ impl PlayerApp {
                 if ui
                     .add_enabled(
                         self.player.is_some(),
-                        egui::Button::new("Search Movies…").shortcut_text("Ctrl+Shift+M"),
+                        egui::Button::new("Search Movies…").shortcut_text(
+                            self.key_bindings
+                                .label(key_bindings::Action::SearchMovies, &ctx),
+                        ),
                     )
                     .clicked()
                 {
@@ -967,7 +997,11 @@ impl PlayerApp {
             if icons::button(
                 ui,
                 Icon::Playlist,
-                "Sidebar: playlist, subtitles, history, watch together (Ctrl/Cmd+L)",
+                &self.key_bindings.hint(
+                    key_bindings::Action::Playlist,
+                    "Sidebar: playlist, subtitles, history, watch together",
+                    &ctx,
+                ),
                 self.show_playlist,
             )
             .clicked()
@@ -996,7 +1030,15 @@ impl PlayerApp {
                 self.next();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if icons::button(ui, Icon::Fullscreen, "Fullscreen (F)", self.fullscreen).clicked()
+                if icons::button(
+                    ui,
+                    Icon::Fullscreen,
+                    &self
+                        .key_bindings
+                        .hint(key_bindings::Action::Fullscreen, "Fullscreen", &ctx),
+                    self.fullscreen,
+                )
+                .clicked()
                 {
                     self.toggle_fullscreen(&ctx);
                 }
@@ -1094,7 +1136,16 @@ impl PlayerApp {
             let can_skip = seekable && !idle && !self.loading;
             let backward = ui
                 .add_enabled_ui(can_skip, |ui| {
-                    icons::button(ui, Icon::SkipBackward, "Skip backward 5 seconds (←)", false)
+                    icons::button(
+                        ui,
+                        Icon::SkipBackward,
+                        &self.key_bindings.hint(
+                            key_bindings::Action::SeekBackward,
+                            "Skip backward 5 seconds",
+                            &ctx,
+                        ),
+                        false,
+                    )
                 })
                 .inner;
             #[cfg(test)]
@@ -1113,7 +1164,9 @@ impl PlayerApp {
                         } else {
                             Icon::Pause
                         },
-                        "Play / Pause (Space)",
+                        &self
+                            .key_bindings
+                            .hint(key_bindings::Action::Pause, "Play / Pause", &ctx),
                         false,
                     )
                 })
@@ -1131,7 +1184,16 @@ impl PlayerApp {
             }
             let forward = ui
                 .add_enabled_ui(can_skip, |ui| {
-                    icons::button(ui, Icon::SkipForward, "Skip forward 5 seconds (→)", false)
+                    icons::button(
+                        ui,
+                        Icon::SkipForward,
+                        &self.key_bindings.hint(
+                            key_bindings::Action::SeekForward,
+                            "Skip forward 5 seconds",
+                            &ctx,
+                        ),
+                        false,
+                    )
                 })
                 .inner;
             #[cfg(test)]
@@ -1325,7 +1387,9 @@ impl PlayerApp {
                         icons::button(
                             ui,
                             if muted { Icon::Muted } else { Icon::Volume },
-                            "Mute (M)",
+                            &self
+                                .key_bindings
+                                .hint(key_bindings::Action::Mute, "Mute", &ctx),
                             muted,
                         )
                     })
@@ -1859,7 +1923,9 @@ impl PlayerApp {
             (
                 i.pointer.delta() != egui::Vec2::ZERO
                     || i.pointer.any_down()
-                    || i.key_pressed(Key::F),
+                    || i.events
+                        .iter()
+                        .any(|event| matches!(event, egui::Event::Key { pressed: true, .. })),
                 i.pointer
                     .hover_pos()
                     .is_some_and(|p| p.y < 30.0 || p.y > i.content_rect().height() - 46.0),
@@ -1873,6 +1939,7 @@ impl PlayerApp {
             || self.show_settings
             || self.show_info
             || self.show_playlist
+            || self.watch_party.social.open
             || self.seek_preview.is_some()
             || self.volume_preview.is_some();
         let chrome_visible = chrome_visible(
@@ -1907,35 +1974,26 @@ impl PlayerApp {
 
         #[cfg(target_os = "macos")]
         self.updates.ui(ctx);
+        self.watch_social_ui(ctx);
         self.settings_dialog(ctx);
         self.network_dialog(ctx);
         self.movie_search_dialog(ctx);
         self.subtitle_search_dialog(ctx);
         if self.show_help {
             egui::Window::new("Keyboard shortcuts")
+                .vscroll(true)
                 .open(&mut self.show_help)
                 .collapsible(false)
                 .show(ctx, |ui| {
                     egui::Grid::new("shortcuts")
                         .spacing([30.0, 12.0])
                         .show(ui, |ui| {
-                            for (key, action) in [
-                                ("Ctrl / Cmd + ,", "Settings"),
-                                ("Ctrl / Cmd + O", "Open media"),
-                                ("Ctrl / Cmd + N", "Open network stream"),
-                                ("Ctrl / Cmd + Shift + M", "Search movies"),
-                                ("Ctrl / Cmd + L", "Toggle playlist"),
-                                ("Space", "Play / pause"),
-                                ("← / →", "Seek 5 seconds"),
-                                ("↑ / ↓", "Adjust volume"),
-                                ("M", "Mute / unmute"),
-                                ("F / double click video", "Toggle fullscreen"),
-                                ("Escape", "Leave fullscreen"),
-                            ] {
+                            for action in key_bindings::Action::ALL {
                                 ui.label(
-                                    RichText::new(key).color(ui.visuals().selection.stroke.color),
+                                    RichText::new(self.key_bindings.label(action, ctx))
+                                        .color(ui.visuals().selection.stroke.color),
                                 );
-                                ui.label(action);
+                                ui.label(action.label());
                                 ui.end_row();
                             }
                         });
@@ -2181,6 +2239,45 @@ mod tests {
         let output = draw(&mut app, vec![]);
         assert_eq!(app.settings_tab, settings_panel::SettingsTab::Appearance);
         assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == "Theme")), "theme picker must be visible after switching tabs");
+    }
+
+    #[test]
+    fn settings_key_bindings_tab_lists_shortcuts() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = PlayerApp::from_parts(&ctx, None, None, None, vec![]);
+        app.key_bindings = key_bindings::KeyBindings::default();
+        app.initial_resize = false;
+        app.open_settings();
+        draw(&mut app, vec![]);
+        let output = draw(&mut app, vec![]);
+        click(&mut app, named_rect(&output, "Key Bindings").center());
+        let output = draw(&mut app, vec![]);
+        assert_eq!(app.settings_tab, settings_panel::SettingsTab::KeyBindings);
+        named_rect(&output, "Open media shortcut");
+        // An unassigned shortcut is still an editable button.
+        named_rect(&output, "Audio settings shortcut");
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.job.text.contains("Changes are saved automatically"))));
+        click(&mut app, named_rect(&output, "Settings shortcut:").center());
+        assert_eq!(
+            app.key_bindings.capturing,
+            Some(key_bindings::Action::Settings)
+        );
+        let output = draw(
+            &mut app,
+            vec![egui::Event::Key {
+                key: Key::M,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.show_settings);
+        assert!(app.key_bindings.error.as_ref().unwrap().contains("Mute"));
+        click(&mut app, named_rect(&output, "Cancel").center());
+        assert!(app.key_bindings.capturing.is_none());
     }
 
     #[test]
@@ -2605,6 +2702,21 @@ mod tests {
         if std::env::var_os("NVPLAY_TEST_SETTINGS").is_some() {
             app.open_audio_settings();
         }
+        if std::env::var_os("NVPLAY_TEST_SOCIAL").is_some() {
+            app.watch_party.social.joined("alex".into(), "Alex".into());
+            app.watch_party.social.received(watch_protocol::ChatEntry {
+                id: 1,
+                sender: watch_protocol::Participant {
+                    peer: "alex".into(),
+                    name: "Alex".into(),
+                    host: false,
+                },
+                text: "Ready for movie night? 🎬".into(),
+                sent_at: 0,
+            });
+            app.watch_party.social.open = true;
+        }
+
         let mut painter = eframe::egui_glow::Painter::new(gl.clone(), "", None, false).unwrap();
         let destination = unsafe {
             let texture = gl.create_texture().unwrap();

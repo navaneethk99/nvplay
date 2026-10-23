@@ -1,7 +1,7 @@
 //! Messages shared by the desktop broadcaster, signaling service, and browser.
 mod social;
-pub use social::*;
 use serde::{Deserialize, Serialize};
+pub use social::*;
 
 pub const MAX_VIEWERS: usize = 6;
 pub const MAX_MESSAGE: usize = 128 * 1024;
@@ -179,9 +179,15 @@ pub enum Message {
         name: String,
         peer: String,
     },
-    ChatSend { text: String },
-    Chat { entry: ChatEntry },
-    ChatRejected { message: String },
+    ChatSend {
+        text: String,
+    },
+    Chat {
+        entry: ChatEntry,
+    },
+    ChatRejected {
+        message: String,
+    },
     PeerLeft {
         peer: String,
     },

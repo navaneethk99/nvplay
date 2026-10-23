@@ -212,6 +212,7 @@ pub(super) async fn run(
     ffmpeg: Option<PathBuf>,
     media: Option<watch_protocol::Media>,
     mut snapshots: watch::Receiver<Snapshot>,
+    mut chat: mpsc::Receiver<String>,
     mut stopped: oneshot::Receiver<()>,
     emit: Emitter,
 ) -> Result<(), String> {
@@ -228,7 +229,7 @@ pub(super) async fn run(
         result = tokio::time::timeout(Duration::from_secs(15), connect) => result.map_err(|_| "The watch service did not respond")?.map_err(|_| "Could not connect to the watch service. Check its address and internet connection.")?,
     };
     if let Some(media) = media {
-        return super::direct::run(socket, key, media, snapshots, stopped, emit).await;
+        return super::direct::run(socket, key, media, snapshots, chat, stopped, emit).await;
     }
     let ffmpeg = ffmpeg.ok_or("Install FFmpeg to broadcast local files")?;
     let access = snapshots.borrow().access;
@@ -332,6 +333,9 @@ pub(super) async fn run(
         loop {
             tokio::select! {
                 _ = &mut stopped => { break; }
+                Some(text) = chat.recv(), if created => {
+                    socket.send(WsMessage::Text(serde_json::to_string(&Message::ChatSend { text }).unwrap().into())).await.map_err(|_| "The watch service disconnected")?;
+                }
                 _ = &mut handshake_deadline, if !created || staged_url.is_some() => return Err("The watch service did not establish the streaming uplink".into()),
                 changed = snapshots.changed() => {
                     if changed.is_err() { break; }
@@ -411,11 +415,12 @@ pub(super) async fn run(
                                     peers.insert("__publisher".into(), publisher);
                                     created = true; staged_url = Some(url);
                                 }
-                                Message::PeerJoined { peer: id } if viewers.contains(&id) || viewers.len() < MAX_VIEWERS => {
+                                Message::PeerJoined { peer: id, name } if viewers.contains(&id) || viewers.len() < MAX_VIEWERS => {
                                     preview_at = None;
-                                    viewers.insert(id); emit.send(Event::Viewers(viewers.len()));
+                                    if viewers.insert(id.clone()) { emit.send(Event::PeerJoined { peer: id, name }); }
+                                    emit.send(Event::Viewers(viewers.len()));
                                 }
-                                Message::PeerLeft { peer } => { preview_at = None; viewers.remove(&peer); emit.send(Event::Viewers(viewers.len())); }
+                                Message::PeerLeft { peer } => { preview_at = None; viewers.remove(&peer); emit.send(Event::PeerLeft(peer)); emit.send(Event::Viewers(viewers.len())); }
                                 Message::Answer { peer, sdp } => if let Some(viewer) = peers.get_mut(&peer) {
                                     let accepted = match RTCSessionDescription::answer(sdp) {
                                         Ok(answer) => viewer.connection.set_remote_description(answer).await.is_ok(),
@@ -453,6 +458,8 @@ pub(super) async fn run(
                                     }
                                 }
                                 Message::Control { control } if control.valid() => emit.send(Event::Control(control)),
+                                Message::Chat { entry } => emit.send(Event::Chat(entry)),
+                                Message::ChatRejected { message } => emit.send(Event::ChatRejected(message)),
                                 Message::Error { message } => return Err(message),
                                 Message::Ended => break,
                                 _ => {},

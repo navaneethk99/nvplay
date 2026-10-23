@@ -110,3 +110,23 @@ Live smoke checks on 2026-10-23 decoded a resolved Cinejoy stream and started a
 YouTube embed in Chromium. Cinejoy timed out on the first attempt and succeeded
 on retry. These results do not establish availability for every title, network,
 or browser. Safari/native HLS has not been exercised in this change.
+
+## Participant names and chat
+
+The browser requires a name before opening its session socket. `join.name` is
+validated and normalized by the server (1–32 Unicode characters). A successful
+`joined` response includes the participant roster and recent chat. `peer_joined`
+carries the server-confirmed name; `peer_left` removes the participant. The relay's
+second readiness notification is deduplicated by the desktop host, so it refreshes
+a paused frame without repeating a join popup.
+
+Clients submit `chat_send` with text only. The service attaches the authenticated
+participant, monotonic room message ID, and timestamp to the echoed `chat` event.
+Clients confirm sends from the echo and preserve drafts on rejection/disconnect.
+Both direct/provider and WebRTC host loops carry chat. Chat has its own per-socket
+burst limit (five messages, replenishing one every two seconds), a 500-character
+limit, and a 40-message in-memory history. `chat_rejected` does not interrupt video
+or playback controls. Rooms, identities, and histories stay isolated and are
+removed when the host ends the session. Display names are self-chosen, not verified
+identities; the server assigns the Host role. Both UIs render names and messages as
+plain text. Deploy the desktop and service protocol changes together.
