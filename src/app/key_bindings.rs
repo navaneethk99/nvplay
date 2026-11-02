@@ -15,6 +15,7 @@ pub(super) enum Action {
     Pause,
     SeekBackward,
     SeekForward,
+    GoToTimestamp,
     Fullscreen,
     LeaveFullscreen,
     Mute,
@@ -34,7 +35,7 @@ pub(super) enum Action {
 }
 
 impl Action {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::Settings,
         Self::AudioSettings,
         Self::Open,
@@ -44,6 +45,7 @@ impl Action {
         Self::Pause,
         Self::SeekBackward,
         Self::SeekForward,
+        Self::GoToTimestamp,
         Self::Fullscreen,
         Self::LeaveFullscreen,
         Self::Mute,
@@ -73,6 +75,7 @@ impl Action {
             Self::Pause => "Play / pause",
             Self::SeekBackward => "Seek backward 5 seconds",
             Self::SeekForward => "Seek forward 5 seconds",
+            Self::GoToTimestamp => "Go to timestamp",
             Self::Fullscreen => "Toggle fullscreen",
             Self::LeaveFullscreen => "Leave fullscreen",
             Self::Mute => "Mute / unmute",

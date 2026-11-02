@@ -33,6 +33,15 @@ show the action already using that shortcut. Use **Clear** to remove a binding,
 Help, menu labels, and control tooltips follow your assignments. Escape continues
 to close dialogs; its fullscreen shortcut can be changed separately.
 
+## Go to a timestamp
+
+Double-click the **minutes** or **seconds** in the elapsed time beside the timeline
+to edit that component directly in place. For long videos, hours are editable too.
+Type the new value and press **Enter** to seek; the other components stay unchanged.
+**Escape** or clicking away cancels. Invalid or out-of-range values are marked in red.
+This works in fullscreen and preserves pause. You can assign **Go to timestamp**
+in **Settings → Key Bindings** to start editing the minute field.
+
 ## Audio settings
 
 Open **Settings → Audio**, or choose **Audio → Audio Settings…**. Select an audio
@@ -52,6 +61,48 @@ single track. Mixes reset when another file opens. The engine uses one output
 device at a time; for simultaneous speakers and headphones, create a system
 multi-output device and choose it in the output dropdown. On macOS, **Open Audio
 MIDI Setup…** opens the system utility for this.
+
+## Radio
+
+Choose **Playback → Radio…** in the macOS menu bar (also under Playback on
+Windows/Linux). Choose **Internet** or **Hardware**, then rotate the wheel,
+scroll over it, or focus it and use the arrow keys to tune in 0.1 MHz steps.
+Playback starts automatically after the dial settles for 300 ms. Close the
+tuner to keep listening; volume, mute and stop use the usual player controls.
+Radio does not create watch-history entries.
+
+**Internet** requires a connection. The initial catalog contains five Indian
+FM simulcasts: FM Gold Delhi (100.1), FM Rainbow Chennai (101.4), Delhi (102.6),
+Mumbai (107.1), and Kochi (107.5 MHz). Cities appear beside station names because
+FM allocations vary by location. Click station markers on the frequency strip,
+or use Previous/Next to switch stations. Empty frequencies are silent. Streams
+come from the [Akashvani live directory](https://akashvani.gov.in/radio/live.php);
+availability depends on the broadcaster. Use Retry if a station is unavailable.
+
+**Hardware** receives local FM offline using a compatible **RTL-SDR USB receiver
+and FM antenna**, plus the `rtl_fm` tool from
+[RTL-SDR](https://github.com/osmocom/rtl-sdr). An antenna alone is insufficient.
+On macOS, install the tools with `brew install rtl-sdr`; on Debian/Ubuntu use
+`sudo apt install rtl-sdr`. Windows needs an RTL-SDR-compatible USB driver and
+`rtl_fm.exe` on PATH. The app also searches its bundled tools and Homebrew paths;
+`NVPLAY_RTL_FM` can specify an absolute executable path. The first receiver
+(device 0) is used, with automatic gain and mono wideband FM at 32 kHz.
+
+The hardware dial tunes every frequency in the band, independent of the
+internet catalog; reception depends on nearby transmitters and signal strength,
+and empty frequencies may produce static. Previous/Next changes frequency by
+0.1 MHz. Pausing releases the receiver; Play reconnects to the live broadcast.
+Retuning, switching source, opening other media, Stop, and app exit release the
+receiver. Missing tools, USB access failures and disconnects show an error and
+Retry; hardware mode never silently switches to internet playback.
+
+To check the local receiver-audio bridge with simulated PCM and real libmpv
+(no hardware, network or audible output):
+
+```sh
+cargo test --locked receiver_pcm_reaches_player -- --ignored
+```
+
 
 ## Run
 

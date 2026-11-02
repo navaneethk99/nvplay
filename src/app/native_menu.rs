@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 enum Action {
     Open,
     Network,
+    Radio,
     SearchMovies,
     Pause,
     Mute,
@@ -325,6 +326,7 @@ impl PlayerApp {
             Action::AutomaticUpdates => self.updates.toggle_automatic(),
             Action::Open => self.pick(false),
             Action::Network => self.show_url = true,
+            Action::Radio => self.open_radio(),
             Action::SearchMovies => self.open_movie_search(),
             Action::Pause => self.toggle_pause(),
             Action::Mute => self.toggle_mute(),
@@ -403,10 +405,13 @@ impl PlayerApp {
                 )
                 .enabled(available),
                 Entry::item("Stop", Stop).enabled(self.loading || state.is_some_and(|s| !s.idle)),
-                Entry::item("Previous", Previous).enabled(self.current.is_some_and(|i| i > 0)),
+                Entry::item("Previous", Previous)
+                    .enabled(self.radio.is_active() || self.current.is_some_and(|i| i > 0)),
                 Entry::item("Next", Next).enabled(
-                    super::next_index(self.current, self.queue.len(), self.repeat).is_some(),
+                    self.radio.is_active()
+                        || super::next_index(self.current, self.queue.len(), self.repeat).is_some(),
                 ),
+                Entry::item("Radio…", Radio).enabled(available),
                 Entry::separator(),
                 Entry::submenu(
                     "Speed",
@@ -537,6 +542,16 @@ mod tests {
             )
         );
         assert_eq!(entries[0][2].action, Some(Action::SearchMovies));
+        assert!(
+            !entries[0]
+                .iter()
+                .any(|entry| entry.action == Some(Action::Radio))
+        );
+        assert!(
+            entries[1]
+                .iter()
+                .any(|entry| entry.action == Some(Action::Radio))
+        );
         assert!(!entries[1][0].enabled);
         assert_eq!(entries[4][0].title, "Download Subtitle…");
         assert_eq!(entries[4][0].action, Some(Action::DownloadSubtitle));
@@ -564,6 +579,13 @@ mod tests {
             app.fullscreen = fullscreen;
             let output = ctx.run(egui::RawInput::default(), |ctx| app.ui(ctx));
             let update = output.platform_output.accesskit_update.unwrap();
+            assert!(
+                !update
+                    .nodes
+                    .iter()
+                    .any(|(_, node)| node.label() == Some("Radio")),
+                "Radio belongs in the native Playback menu, not the toolbar"
+            );
             assert!(
                 !update
                     .nodes

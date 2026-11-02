@@ -11,9 +11,11 @@ mod native_menu;
 mod party_social;
 mod posters;
 mod preview;
+mod radio;
 mod settings_panel;
 mod subtitle_controls;
 mod subtitle_search;
+mod timestamp;
 #[cfg(target_os = "macos")]
 mod updates;
 mod video_aurora;
@@ -90,6 +92,7 @@ pub struct PlayerApp {
     error: Option<String>,
     startup_error: bool,
     show_url: bool,
+    radio: radio::Radio,
     movie_search: movie_search::MovieSearch,
     subtitle_search: subtitle_search::SubtitleSearch,
     playback_generation: u64,
@@ -117,6 +120,7 @@ pub struct PlayerApp {
     dialog: Option<Pin<Box<dyn Future<Output = DialogResult>>>>,
     dialog_busy: bool,
     seek_preview: Option<f64>,
+    timestamp_editor: Option<timestamp::TimestampEditor>,
     frame_preview: preview::Preview,
     loading: bool,
     ctx: egui::Context,
@@ -147,6 +151,9 @@ struct ControlRects {
     mute: Option<egui::Rect>,
     stop: Option<egui::Rect>,
     preview_time: Option<egui::Rect>,
+    elapsed_time: Option<egui::Rect>,
+    timestamp_minutes: Option<egui::Rect>,
+    timestamp_seconds: Option<egui::Rect>,
 }
 
 impl PlayerApp {
@@ -193,6 +200,7 @@ impl PlayerApp {
             error,
             startup_error,
             show_url: false,
+            radio: radio::Radio::default(),
             movie_search: movie_search::MovieSearch::default(),
             subtitle_search: subtitle_search::SubtitleSearch::default(),
             playback_generation: 0,
@@ -220,6 +228,7 @@ impl PlayerApp {
             dialog: None,
             dialog_busy: false,
             seek_preview: None,
+            timestamp_editor: None,
             frame_preview: preview::Preview::default(),
             loading: false,
             ctx: ctx.clone(),
@@ -268,6 +277,7 @@ impl PlayerApp {
         }
     }
     fn play(&mut self, index: usize) {
+        self.radio.leave();
         if self.queue.get(index).is_some() {
             self.clear_audio_mix();
         }
@@ -278,6 +288,11 @@ impl PlayerApp {
         if let (Some(media), Some(player)) = (self.queue.get(index), self.player.as_mut()) {
             match player.load(&media.source) {
                 Ok(()) => {
+                    self.radio.loaded(&media.source);
+                    if self.radio.is_active() {
+                        let _ = player.command(&["set", "force-media-title", &media.name]);
+                        let _ = player.command(&["set", "speed", "1"]);
+                    }
                     if streaming::cinejoy::movie_id(&media.source).is_some()
                         && media.name != media.source
                     {
@@ -299,17 +314,38 @@ impl PlayerApp {
         }
     }
     fn next(&mut self) {
+        if self.radio.is_active() {
+            self.radio_step(true);
+            return;
+        }
         if let Some(next) = next_index(self.current, self.queue.len(), self.repeat) {
             self.play(next);
         }
     }
     fn previous(&mut self) {
+        if self.radio.is_active() {
+            self.radio_step(false);
+            return;
+        }
         if let Some(index) = self.current {
             self.play(index.saturating_sub(1));
         }
     }
     fn toggle_pause(&mut self) {
+        if self.radio.hardware_frequency.is_some() {
+            if self.radio.hardware_running() {
+                self.stop();
+                self.radio.hardware_paused = true;
+            } else {
+                self.play_hardware_radio();
+            }
+            return;
+        }
         if self.player.as_ref().is_some_and(|p| p.state.idle) {
+            if let Some(index) = self.radio.active {
+                self.play_radio(index);
+                return;
+            }
             if let Some(index) = self
                 .current
                 .or(if self.queue.is_empty() { None } else { Some(0) })
@@ -446,6 +482,12 @@ impl PlayerApp {
             }
             self.key_bindings.capturing = None;
         }
+        if self.timestamp_editor.is_some() {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+                self.timestamp_editor = None;
+            }
+            return;
+        }
         if self.key_bindings.global_pressed(ctx, Action::Settings) {
             self.open_settings();
             return;
@@ -455,6 +497,11 @@ impl PlayerApp {
             return;
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            if self.radio.open {
+                self.radio.open = false;
+                self.radio.cancel();
+                return;
+            }
             if self.subtitle_search.open {
                 self.subtitle_search.close();
                 return;
@@ -485,6 +532,7 @@ impl PlayerApp {
             }
         }
         if ctx.wants_keyboard_input()
+            || self.radio.open
             || self.show_url
             || self.show_help
             || self.show_settings
@@ -505,6 +553,7 @@ impl PlayerApp {
                     Action::Pause => self.toggle_pause(),
                     Action::SeekBackward => self.command(&["seek", "-5", "relative+exact"]),
                     Action::SeekForward => self.command(&["seek", "5", "relative+exact"]),
+                    Action::GoToTimestamp => self.open_timestamp_editor(),
                     Action::Fullscreen => self.toggle_fullscreen(ctx),
                     Action::LeaveFullscreen
                         if self.fullscreen && !egui::Popup::is_any_open(ctx) =>
@@ -549,6 +598,8 @@ impl PlayerApp {
     }
 
     fn stop(&mut self) {
+        self.radio.cancel();
+        self.radio.stop_hardware();
         self.watch_party.end();
         self.checkpoint_history();
         self.watch_history.flush();
@@ -619,6 +670,10 @@ impl PlayerApp {
                 }
             });
             ui.menu_button("Playback", |ui| {
+                if ui.button("Radio…").clicked() {
+                    self.open_radio();
+                    ui.close();
+                }
                 if ui.button("Play / Pause").clicked() {
                     self.toggle_pause();
                     ui.close();
@@ -1008,8 +1063,9 @@ impl PlayerApp {
             {
                 self.show_playlist = !self.show_playlist;
             }
-            let has_previous = self.current.is_some_and(|i| i > 0);
-            let has_next = next_index(self.current, self.queue.len(), self.repeat).is_some();
+            let has_previous = self.radio.is_active() || self.current.is_some_and(|i| i > 0);
+            let has_next = self.radio.is_active()
+                || next_index(self.current, self.queue.len(), self.repeat).is_some();
             if ui
                 .add_enabled_ui(has_previous, |ui| {
                     icons::button(ui, Icon::Previous, "Previous", false)
@@ -1210,7 +1266,7 @@ impl PlayerApp {
                 |ui| {
                     ui.visuals_mut().selection.bg_fill = ui.visuals().selection.stroke.color;
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    let elapsed = format_time(display_position);
+                    let elapsed = format_time(self.timestamp_display_position(display_position));
                     let remaining = if !idle && duration <= 0.0 {
                         "LIVE".into()
                     } else {
@@ -1234,9 +1290,9 @@ impl PlayerApp {
                             4.0
                         })
                     .max(20.0);
-                    ui.label(RichText::new(elapsed).monospace().size(11.0));
-                    let mut seek = display_position;
                     let can_seek = seekable && duration > 0.0 && !idle && !self.loading;
+                    self.timestamp_ui(ui, display_position, can_seek);
+                    let mut seek = display_position;
                     ui.spacing_mut().slider_width = seek_width;
                     ui.spacing_mut().interact_size.y = 28.0;
                     ui.spacing_mut().slider_rail_height = 28.0;
@@ -1561,6 +1617,10 @@ impl PlayerApp {
                         self.show_url = true;
                         ui.close();
                     }
+                    if ui.button("Radio…").clicked() {
+                        self.open_radio();
+                        ui.close();
+                    }
                     if ui.button("Search Movies…").clicked() {
                         self.open_movie_search();
                         ui.close();
@@ -1776,12 +1836,23 @@ impl PlayerApp {
 
     fn handle_playback_event(&mut self, event: PlaybackEvent) {
         match event {
+            PlaybackEvent::Finished if self.radio.is_active() => {
+                self.loading = false;
+                let message = if self.radio.hardware_frequency.is_some() {
+                    "Hardware radio stopped. Check the receiver and tune again to reconnect."
+                } else {
+                    "The radio stream ended. Tune again to reconnect."
+                };
+                self.radio_playback_error(message);
+                self.error = Some(message.into());
+            }
             PlaybackEvent::Finished => {
                 self.history_finished();
                 self.loading = false;
                 self.next();
             }
             PlaybackEvent::Error(error) => {
+                self.radio_playback_error(&error);
                 self.checkpoint_history();
                 self.watch_history.flush();
                 if self.loading {
@@ -1792,9 +1863,13 @@ impl PlayerApp {
             }
             PlaybackEvent::Loaded => {
                 self.loading = false;
-                self.restore_subtitle();
+                if !self.radio.is_active() {
+                    self.restore_subtitle();
+                }
                 self.restore_audio_settings();
-                self.history_loaded();
+                if !self.radio.is_active() {
+                    self.history_loaded();
+                }
             }
             PlaybackEvent::SubtitleAdded { id, result } => self.subtitle_added(id, result),
             PlaybackEvent::MuteApplied { id, result } => self.mute_applied(id, result),
@@ -1840,6 +1915,7 @@ impl PlayerApp {
         for event in events {
             self.handle_playback_event(event);
         }
+        self.poll_radio_hardware();
         self.poll_watch_party();
         self.poll_mute(ctx);
         self.subtitle_preferences.poll(ctx);
@@ -1932,11 +2008,13 @@ impl PlayerApp {
             )
         });
         let pinned = egui::Popup::is_any_open(ctx)
+            || self.radio.open
             || self.show_url
             || self.movie_search.open
             || self.subtitle_search.open
             || self.show_help
             || self.show_settings
+            || self.timestamp_editor.is_some()
             || self.show_info
             || self.show_playlist
             || self.watch_party.social.open
@@ -1977,6 +2055,7 @@ impl PlayerApp {
         self.watch_social_ui(ctx);
         self.settings_dialog(ctx);
         self.network_dialog(ctx);
+        self.radio_dialog(ctx);
         self.movie_search_dialog(ctx);
         self.subtitle_search_dialog(ctx);
         if self.show_help {
@@ -2033,6 +2112,7 @@ impl eframe::App for PlayerApp {
         self.ui(ctx);
     }
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.radio.leave();
         self.watch_party.end();
         self.checkpoint_history();
         self.watch_history.flush();
@@ -2584,7 +2664,7 @@ mod tests {
         }
     }
 
-    fn draw(app: &mut PlayerApp, events: Vec<egui::Event>) -> egui::FullOutput {
+    pub(super) fn draw(app: &mut PlayerApp, events: Vec<egui::Event>) -> egui::FullOutput {
         let ctx = app.ctx.clone();
         ctx.run(
             egui::RawInput {
@@ -2606,7 +2686,7 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         }
     }
-    fn click(app: &mut PlayerApp, position: egui::Pos2) -> egui::FullOutput {
+    pub(super) fn click(app: &mut PlayerApp, position: egui::Pos2) -> egui::FullOutput {
         draw(app, vec![egui::Event::PointerMoved(position)]);
         draw(app, vec![pointer(position, true)]);
         draw(app, vec![pointer(position, false)]);
@@ -2628,7 +2708,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
-    fn named_rect(output: &egui::FullOutput, label: &str) -> egui::Rect {
+    pub(super) fn named_rect(output: &egui::FullOutput, label: &str) -> egui::Rect {
         let nodes = &output
             .platform_output
             .accesskit_update
@@ -2858,6 +2938,103 @@ mod tests {
             gl.delete_framebuffer(destination.0);
             gl.delete_texture(destination.1);
         }
+    }
+
+    #[test]
+    #[ignore = "requires libmpv and NVPLAY_TEST_MEDIA (seekable video at least 150 seconds); null outputs, no sound"]
+    fn real_inline_timestamp_edits_individual_components_without_a_popup() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        theme(&ctx);
+        let player = Player::for_ui_test(&ctx).unwrap();
+        let media = std::env::var_os("NVPLAY_TEST_MEDIA").expect("set NVPLAY_TEST_MEDIA");
+        let mut app = PlayerApp::from_parts(&ctx, Some(player), None, None, vec![media]);
+        app.initial_resize = false;
+        until(&mut app, |app| {
+            !app.loading
+                && app
+                    .player
+                    .as_ref()
+                    .is_some_and(|p| p.state.seekable && p.state.duration >= 150.0)
+        });
+        app.command(&["set", "pause", "yes"]);
+        app.commit_seek(75.0);
+        until(&mut app, |app| {
+            app.player
+                .as_ref()
+                .is_some_and(|p| p.state.paused && (p.state.position - 75.0).abs() < 0.1)
+        });
+        let timeline = app.control_rects.seek.unwrap();
+        let minutes = app.control_rects.timestamp_minutes.unwrap().center();
+        click(&mut app, minutes);
+        assert!(app.timestamp_editor.is_none());
+        click(&mut app, minutes);
+        let output = draw(&mut app, vec![]);
+        let field = named_rect(&output, "Minutes");
+        assert!(field.width() < 30.0 && field.bottom() <= 400.0);
+        assert_eq!(
+            app.control_rects.seek.unwrap(),
+            timeline,
+            "editing must not move the timeline"
+        );
+        assert!(ctx.wants_keyboard_input());
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.job.text == "Go to timestamp")));
+        let enter = || egui::Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw(&mut app, vec![egui::Event::Text("02".into())]);
+        draw(&mut app, vec![enter()]);
+        assert!(app.timestamp_editor.is_none());
+        until(&mut app, |app| {
+            (app.player.as_ref().unwrap().state.position - 135.0).abs() < 0.1
+        });
+        let seconds = app.control_rects.timestamp_seconds.unwrap().center();
+        click(&mut app, seconds);
+        click(&mut app, seconds);
+        assert!(
+            app.timestamp_editor.is_some(),
+            "seconds must enter editing after double-click"
+        );
+        draw(&mut app, vec![]);
+        draw(&mut app, vec![egui::Event::Text("60".into())]);
+        draw(&mut app, vec![enter()]);
+        assert!(
+            app.timestamp_editor.is_some(),
+            "invalid seconds must not seek"
+        );
+        draw(&mut app, vec![]);
+        draw(&mut app, vec![egui::Event::Text("20".into())]);
+        draw(&mut app, vec![enter()]);
+        assert!(app.timestamp_editor.is_none());
+        until(&mut app, |app| {
+            (app.player.as_ref().unwrap().state.position - 140.0).abs() < 0.1
+        });
+        assert!(app.player.as_ref().unwrap().state.paused);
+        app.fullscreen = true;
+        app.open_timestamp_editor();
+        draw(&mut app, vec![]);
+        draw(&mut app, vec![egui::Event::Text("0".into())]);
+        draw(
+            &mut app,
+            vec![egui::Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.timestamp_editor.is_none());
+        assert!(app.fullscreen);
+        assert!((app.player.as_ref().unwrap().state.position - 140.0).abs() < 0.1);
+        app.open_timestamp_editor();
+        app.playback_generation += 1;
+        draw(&mut app, vec![]);
+        assert!(app.timestamp_editor.is_none());
     }
 
     #[test]
